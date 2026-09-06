@@ -31,18 +31,18 @@ Orchlet is a production-minded, open-source AI coding-agent orchestration contro
 
 | Capability | Status | Details |
 |---|---|---|
-| **SQLite Workflow Engine & Checkpointing** | **Working** | Durable state machine with `READY_TO_MERGE`, resume, and audit trail |
+| **SQLite Workflow Engine & Checkpointing** | **Working** / **Experimental** | Durable state machine & task persistence (Working); phase-aware automatic resume (Experimental) |
 | **Git Worktree Isolation** | **Working** | Ephemeral worktree sandboxing under `.orchlet/worktrees/` |
 | **Instruction Discovery Engine** | **Working** | Discovers `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, Copilot instructions with SHA-256 |
 | **OpenCode CLI Execution Harness** | **Working** | Executes `opencode run` in isolated worktree with `--auto` and JSON streaming |
 | **Model Router & Quota Allocation** | **Working** | Data-driven catalog (`orchlet.config.json`), tier selection, quota failover |
 | **Automated Verification Runner** | **Working** | Runs test commands, captures stdout/stderr tails, exit codes, durations |
-| **Independent AI Reviewer** | **Working** | OpenRouter-backed structured P0–P3 audit, strict JSON schema, static fallback |
+| **Independent AI Reviewer** | **Working** | OpenRouter-backed structured P0–P3 audit, strict fail-closed semantics in REAL mode (no silent static fallback) |
 | **Automated Remediation Repair Loop** | **Working** | Repaired in worktree, re-tested, re-reviewed before commit |
 | **Real Git Commits & Branch Management** | **Working** | Generates verified commits on work branch with full model audit log |
 | **PR Babysitting & Gate Evaluation** | **Working** | Evaluates CI/review gates, conservative `autoMerge: false` default |
-| **Remote Dashboard & WebSocket Stream** | **Working** | React + Vite UI with dynamic daemon URL, token auth, real-time events |
-| **Docker & Docker Compose Packaging** | **Packaged** | Multi-stage Dockerfile and docker-compose deployment |
+| **Remote Dashboard & WebSocket Stream** | **Working** | React + Vite UI with dynamic daemon URL, single-use 60s ticket auth, real-time events |
+| **Docker & Docker Compose Packaging** | **Packaged** | Multi-stage Dockerfile and docker-compose deployment (`BLOCKED_BY_ENVIRONMENT` on non-elevated host) |
 | **T3 Adapter Integration** | **Experimental** | Runtime discovery from `.t3` config and RPC turn dispatch |
 | **Organization Token Budget Quotas** | **Planned** | Hard monthly token spend limits per team/repo |
 

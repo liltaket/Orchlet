@@ -38,6 +38,7 @@ describe("Dynamic Harness & AgentExecutor Resolution", () => {
     const repoDir = await createTestRepo({
       activeHarness: "opencode",
       git: { push: false, openPr: false },
+      reviewer: { allowStaticFallback: true },
     });
 
     const registry = new AgentExecutorRegistry();

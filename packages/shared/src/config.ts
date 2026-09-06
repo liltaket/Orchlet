@@ -73,6 +73,7 @@ export class ConfigManager {
 
     if (projectRoot) {
       candidatePaths.push(path.join(projectRoot, "orchlet.config.json"));
+      candidatePaths.push(path.join(projectRoot, ".orchlet.json"));
       candidatePaths.push(path.join(projectRoot, ".orchlet", "config.json"));
     }
 

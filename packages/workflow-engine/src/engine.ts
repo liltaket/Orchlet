@@ -228,15 +228,15 @@ export class WorkflowEngine implements IWorkflowEngine {
         );
       }
 
-      this.recordAudit(
-        task,
-        "executor",
-        execResult.providerUsed || execDecision.providerId,
-        execResult.modelUsed || execDecision.modelId,
-        execResult.durationMs,
-        execResult.usage?.totalTokens,
-        execResult.usage?.costEstimateUsd,
-      );
+      this.recordAudit(task, "executor", {
+        requestedProvider: execDecision.providerId,
+        requestedModel: execDecision.modelId,
+        actualProvider: execResult.providerUsed || execDecision.providerId,
+        actualModel: execResult.modelUsed || execDecision.modelId,
+        durationMs: execResult.durationMs,
+        tokens: execResult.usage?.totalTokens,
+        costUsd: execResult.usage?.costEstimateUsd,
+      });
 
       // 5. AUTOMATED VERIFICATION / TESTING PHASE
       await this.transition(task, "VERIFYING", "RUNNING");
@@ -268,23 +268,31 @@ export class WorkflowEngine implements IWorkflowEngine {
         "reviewer",
       );
 
+      const allowStaticFallback = Boolean((config as any)?.reviewer?.allowStaticFallback);
+
       let review: ReviewVerdict = await this.reviewer.reviewDiff(
         diff,
         task.intent,
         verificationResults,
         reviewerPacket,
-        { model: criticDecision.modelId, provider: criticDecision.providerId, executionMode },
+        {
+          model: criticDecision.modelId,
+          provider: criticDecision.providerId,
+          executionMode,
+          allowStaticFallback,
+        },
       );
       task.latestReview = review;
-      this.recordAudit(
-        task,
-        "critic",
-        review.providerUsed || criticDecision.providerId,
-        review.reviewerModel,
-        120,
-        review.tokensUsed?.total,
-        review.costEstimate,
-      );
+      this.recordAudit(task, "critic", {
+        requestedProvider: criticDecision.providerId,
+        requestedModel: criticDecision.modelId,
+        actualProvider: review.actualProvider || review.providerUsed || criticDecision.providerId,
+        actualModel: review.actualModel || review.reviewerModel,
+        fallbackReason: review.fallbackReason,
+        durationMs: 120,
+        tokens: review.tokensUsed?.total,
+        costUsd: review.costEstimate,
+      });
 
       const maxRepairAttempts = 3;
       let repairAttempt = 0;
@@ -352,15 +360,15 @@ export class WorkflowEngine implements IWorkflowEngine {
           },
         });
 
-        this.recordAudit(
-          task,
-          "repairer",
-          repairResult.providerUsed || repairDecision.providerId,
-          repairResult.modelUsed || repairDecision.modelId,
-          repairResult.durationMs,
-          repairResult.usage?.totalTokens,
-          repairResult.usage?.costEstimateUsd,
-        );
+        this.recordAudit(task, "repairer", {
+          requestedProvider: repairDecision.providerId,
+          requestedModel: repairDecision.modelId,
+          actualProvider: repairResult.providerUsed || repairDecision.providerId,
+          actualModel: repairResult.modelUsed || repairDecision.modelId,
+          durationMs: repairResult.durationMs,
+          tokens: repairResult.usage?.totalTokens,
+          costUsd: repairResult.usage?.costEstimateUsd,
+        });
 
         // Re-run test suite after repair
         this.logger.info(`Re-running test suite after repair attempt ${repairAttempt}...`);
@@ -383,9 +391,24 @@ export class WorkflowEngine implements IWorkflowEngine {
           task.intent,
           verificationResults,
           reviewerPacket,
-          { model: criticDecision.modelId, provider: criticDecision.providerId, executionMode },
+          {
+            model: criticDecision.modelId,
+            provider: criticDecision.providerId,
+            executionMode,
+            allowStaticFallback,
+          },
         );
         task.latestReview = review;
+        this.recordAudit(task, "critic", {
+          requestedProvider: criticDecision.providerId,
+          requestedModel: criticDecision.modelId,
+          actualProvider: review.actualProvider || review.providerUsed || criticDecision.providerId,
+          actualModel: review.actualModel || review.reviewerModel,
+          fallbackReason: review.fallbackReason,
+          durationMs: 120,
+          tokens: review.tokensUsed?.total,
+          costUsd: review.costEstimate,
+        });
       }
 
       // Hard gates after repair attempts:
@@ -555,26 +578,36 @@ export class WorkflowEngine implements IWorkflowEngine {
   private recordAudit(
     task: Task,
     role: any,
-    provider: string,
-    model: string,
-    durationMs: number,
-    tokens?: number,
-    costUsd?: number,
+    auditData: {
+      requestedProvider?: string;
+      requestedModel?: string;
+      actualProvider: string;
+      actualModel: string;
+      fallbackReason?: string;
+      durationMs: number;
+      tokens?: number;
+      costUsd?: number;
+    },
   ): void {
     const record: ModelUsageRecord = {
       role,
-      provider,
-      model,
-      durationMs,
-      tokens,
-      costUsd,
+      provider: auditData.actualProvider,
+      model: auditData.actualModel,
+      requestedProvider: auditData.requestedProvider || auditData.actualProvider,
+      requestedModel: auditData.requestedModel || auditData.actualModel,
+      actualProvider: auditData.actualProvider,
+      actualModel: auditData.actualModel,
+      fallbackReason: auditData.fallbackReason,
+      durationMs: auditData.durationMs,
+      tokens: auditData.tokens,
+      costUsd: auditData.costUsd,
       timestamp: new Date().toISOString(),
     };
 
     task.modelUsageAudit = task.modelUsageAudit || [];
     task.modelUsageAudit.push(record);
     this.logger.info(
-      `Audit recorded [${role}]: ${provider}/${model} (${durationMs}ms, tokens=${tokens ?? "N/A"}, cost=$${costUsd ?? 0})`
+      `Audit recorded [${role}]: requested=${record.requestedProvider}/${record.requestedModel} -> actual=${record.actualProvider}/${record.actualModel} (${auditData.durationMs}ms, tokens=${auditData.tokens ?? "N/A"}, cost=$${auditData.costUsd ?? 0})`
     );
   }
 

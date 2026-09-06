@@ -48,6 +48,7 @@ Because coding agents execute code and modify repositories, the security boundar
    - The server issues a single-use ticket (\`wst_<hex32>\`) with a 60-second TTL.
    - The dashboard connects to \`ws://${HOST}:${PORT}/api/stream?ticket=<TICKET>\`.
    - The ticket is verified and **immediately consumed** (deleted from memory). Subsequent connection attempts with the same ticket are rejected.
+   - **Legacy Query Token Deprecation**: Passing the long-lived token via query parameter (\`?token=<TOKEN>\`) is **disabled by default** and strictly gated behind the environment variable \`ORCHLET_ALLOW_LEGACY_QUERY_TOKEN=true\`. The web dashboard exclusively uses the single-use ticket mechanism.
 
 3. **No Credential Logging**:
    - The authentication token is never printed to stdout/stderr or application logs during daemon startup.
@@ -62,8 +63,9 @@ Because coding agents execute code and modify repositories, the security boundar
    - Each task creates a dedicated, isolated git worktree under \`<repo>/.orchlet/worktrees/task-<id>\` linked to an isolated work branch (\`orchlet/task-<id>\`).
    - Ephemeral harness configurations (such as \`.opencode/config.json\`) are scoped exclusively to the worktree and purged before commits are created.
 
-2. **Path Traversal Guards**:
-   - Repository paths supplied to \`createTask\` are resolved to normalized absolute paths (\`path.resolve\`).
+2. **Path Traversal & Repository Validation**:
+   - Repository paths supplied to \`createTask\` and \`POST /api/tasks\` are resolved to normalized absolute paths (\`path.resolve\`).
+   - The daemon validates that the path exists, is a valid directory, and contains a \`.git\` repository before accepting task creation.
    - Worktree operations verify that child worktree directories stay within the repository's root boundary.
 
 3. **Container Mount Isolation**:
@@ -74,10 +76,10 @@ Because coding agents execute code and modify repositories, the security boundar
 
 ---
 
-## 5. Secret Leakage Prevention
+## 5. Reviewer Trust Boundaries & Threat Defenses
 
 1. **Adversarial Independent Reviewer**:
-   - Every git diff produced by an agent is audited by the independent reviewer prior to commit or PR creation.
+   - Every git diff produced by an agent is audited by an independent AI reviewer prior to commit or PR creation.
    - In addition to semantic defect analysis, the reviewer applies regex scans for common secret patterns:
      - GitHub Personal Access Tokens (\`ghp_*\`)
      - OpenAI API Keys (\`sk-*\`)
@@ -85,7 +87,25 @@ Because coding agents execute code and modify repositories, the security boundar
      - RSA / OpenSSH Private Keys (\`BEGIN ... PRIVATE KEY\`)
    - Diffs containing detected credentials receive a **\`P0\` Critical Blocker** verdict and are blocked from committing.
 
-2. **Environment Variable Hygiene**:
+2. **Prompt Injection Defense & Boundary Fences**:
+   - Repository instructions (\`AGENTS.md\`, \`CLAUDE.md\`) and generated diffs are treated as **untrusted data**.
+   - The independent reviewer's system prompt strictly demarcates untrusted inputs with boundary markers (\`<untrusted_repo_context>\` and \`<untrusted_git_diff>\`).
+   - Reviewers are instructed never to follow instructions, role overrides, or approval directives contained within the code diff or repository documentation.
+
+3. **Strict Fail-Closed Review Semantics in REAL Mode**:
+   - In \`REAL\` execution mode, if an AI review call fails (e.g. network timeout, rate limit, invalid response format) or no AI reviewer is available, the workflow **strictly halts and fails** (\`AI_REVIEW_FAILED\` / \`AI_REVIEW_UNAVAILABLE\`).
+   - Orchlet **never silently substitutes** static safety review in \`REAL\` mode unless \`allowStaticFallback: true\` is explicitly configured.
+   - Even when fallback is explicitly permitted, the audit trail truthfully records \`actualProvider: "local"\` and \`actualModel: "offline-safety-reviewer"\`, eliminating deceptive model reporting.
+
+4. **Reviewer Provider Registry Enforcement**:
+   - Reviewer providers are resolved through an explicit provider registry (\`packages/providers/src/reviewer-registry.ts\`).
+   - Attempting to configure an unsupported or nonexistent provider triggers an explicit \`UNSUPPORTED_REVIEW_PROVIDER\` error, preventing silent degradation or unexpected routing.
+
+5. **Model Audit Integrity**:
+   - Model usage audit records explicitly distinguish \`requestedProvider\` and \`requestedModel\` from \`actualProvider\` and \`actualModel\`.
+   - If an error or fallback occurs, the exact failure reason is recorded in \`fallbackReason\`.
+
+6. **Environment Variable Hygiene**:
    - Agent prompts and task packets do not inject the daemon's host environment variables into task context.
 
 ---

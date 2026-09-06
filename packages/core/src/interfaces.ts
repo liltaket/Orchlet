@@ -50,6 +50,8 @@ export interface ReviewOptions {
   model?: string;
   provider?: string;
   executionMode?: ExecutionMode;
+  allowStaticFallback?: boolean;
+  forceAI?: boolean;
 }
 
 export interface IReviewEngine {

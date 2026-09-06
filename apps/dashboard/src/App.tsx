@@ -118,10 +118,12 @@ export function App() {
               const data = await ticketRes.json();
               wsUrl += `?ticket=${data.ticket}`;
             } else {
-              wsUrl += `?token=${encodeURIComponent(authToken.trim())}`;
+              console.warn("Could not acquire WS ticket from daemon; will retry.");
+              return;
             }
-          } catch {
-            wsUrl += `?token=${encodeURIComponent(authToken.trim())}`;
+          } catch (err) {
+            console.warn("Failed to request WS ticket:", err);
+            return;
           }
         }
 

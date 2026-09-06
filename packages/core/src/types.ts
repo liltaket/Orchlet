@@ -87,6 +87,11 @@ export interface ReviewVerdict {
   reviewedCommit: string;
   reviewerModel: string;
   providerUsed?: string;
+  requestedProvider?: string;
+  requestedModel?: string;
+  actualProvider?: string;
+  actualModel?: string;
+  fallbackReason?: string;
   tokensUsed?: { prompt: number; completion: number; total: number };
   costEstimate?: number;
   timestamp: string;
@@ -198,6 +203,11 @@ export interface ModelUsageRecord {
   role: AgentRole;
   provider: string;
   model: string;
+  requestedProvider?: string;
+  requestedModel?: string;
+  actualProvider?: string;
+  actualModel?: string;
+  fallbackReason?: string;
   durationMs: number;
   tokens?: number;
   costUsd?: number;

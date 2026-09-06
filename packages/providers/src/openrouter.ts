@@ -10,6 +10,7 @@ export interface ChatCompletionOptions {
   messages: ChatMessage[];
   temperature?: number;
   maxTokens?: number;
+  responseFormat?: { type: string };
 }
 
 export interface ChatCompletionResult {
@@ -42,6 +43,17 @@ export class OpenRouterProvider {
 
     this.logger.debug(`Dispatching completion to OpenRouter: ${options.model}`);
 
+    const bodyPayload: Record<string, any> = {
+      model: options.model,
+      messages: options.messages,
+      temperature: options.temperature ?? 0.2,
+      max_tokens: options.maxTokens ?? 4096,
+    };
+
+    if (options.responseFormat) {
+      bodyPayload.response_format = options.responseFormat;
+    }
+
     const response = await fetch(`${this.baseUrl}/chat/completions`, {
       method: "POST",
       headers: {
@@ -50,12 +62,8 @@ export class OpenRouterProvider {
         "HTTP-Referer": "https://github.com/liltaket/Orchlet",
         "X-Title": "Orchlet Control Plane",
       },
-      body: JSON.stringify({
-        model: options.model,
-        messages: options.messages,
-        temperature: options.temperature ?? 0.2,
-        max_tokens: options.maxTokens ?? 4096,
-      }),
+      body: JSON.stringify(bodyPayload),
+      signal: AbortSignal.timeout(120000),
     });
 
     if (response.status === 429) {

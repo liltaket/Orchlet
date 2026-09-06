@@ -1,3 +1,5 @@
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import Fastify, { type FastifyInstance } from "fastify";
 import fastifyWebsocket from "@fastify/websocket";
 import fastifyCors from "@fastify/cors";
@@ -62,8 +64,12 @@ export async function createServer(engine = new WorkflowEngine()): Promise<Fasti
       return;
     }
 
-    // Backward-compatible query param check
-    if (query?.token && AuthManager.validateToken(query.token)) {
+    // Backward-compatible query param check (explicitly gated, default OFF)
+    if (
+      process.env.ORCHLET_ALLOW_LEGACY_QUERY_TOKEN === "true" &&
+      query?.token &&
+      AuthManager.validateToken(query.token)
+    ) {
       return;
     }
 
@@ -94,8 +100,18 @@ export async function createServer(engine = new WorkflowEngine()): Promise<Fasti
   // Task APIs
   app.post("/api/tasks", async (req, reply) => {
     const body = (req.body as any) || {};
-    if (!body.intent || !body.repoPath) {
-      return reply.status(400).send({ error: "Missing required 'intent' or 'repoPath'" });
+    if (!body.intent || typeof body.intent !== "string" || !body.repoPath || typeof body.repoPath !== "string") {
+      return reply.status(400).send({ error: "Missing required string 'intent' or 'repoPath'" });
+    }
+
+    const resolvedPath = path.resolve(body.repoPath);
+    try {
+      const stat = await fs.stat(resolvedPath);
+      if (!stat.isDirectory()) {
+        return reply.status(400).send({ error: `'repoPath' must be a valid directory: ${body.repoPath}` });
+      }
+    } catch {
+      return reply.status(400).send({ error: `'repoPath' directory does not exist: ${body.repoPath}` });
     }
 
     try {

@@ -1,0 +1,56 @@
+{
+  "timestamp": "2026-09-06T22:07:32.858Z",
+  "testName": "Production Daemon HTTP -> Real GitHub PR",
+  "durationMs": 90830,
+  "taskId": "3dcb7548d16146a0",
+  "executionMode": "REAL",
+  "finalStatus": "READY_TO_MERGE",
+  "finalAttentionState": "SETTLED",
+  "commitSha": "cf232e8088ee8718e8a0410983d6f814a3854f3e",
+  "prNumber": 3,
+  "prUrl": "https://github.com/liltaket/orchlet-sandbox/pull/3",
+  "requestedExecutorModel": "google/gemini-2.5-flash",
+  "actualExecutorModel": "google/gemini-2.5-flash",
+  "requestedReviewerModel": "google/gemini-2.5-pro",
+  "actualReviewerModel": "google/gemini-2.5-pro",
+  "reviewerTokens": 5609,
+  "reviewerCostUsd": 0.04272875,
+  "verificationResults": [
+    {
+      "command": "npm test",
+      "exitCode": 0,
+      "durationMs": 532,
+      "stdoutTail": "> orchlet-sandbox@1.0.0 test\n> node --test test/*.test.js\n\n✔ sandbox baseline sanity check (0.5802ms)\n▶ titleCase\n  ✔ should title case a single word (0.6898ms)\n  ✔ should title case a sentence (0.1195ms)\n  ✔ should handle already title cased sentences (0.1063ms)\n  ✔ should handle sentences with mixed casing (0.1055ms)\n  ✔ should handle empty strings (0.0933ms)\n  ✔ should handle strings with only spaces (0.1268ms)\n  ✔ should handle strings with leading/trailing spaces (0.1705ms)\n  ✔ should handle numbers in strings (0.104ms)\n  ✔ should handle special characters (0.121ms)\n✔ titleCase (3.2679ms)\nℹ tests 10\nℹ suites 1\nℹ pass 10\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 81.1126",
+      "stderrTail": "",
+      "passed": true
+    }
+  ],
+  "githubPr": {
+    "baseRefName": "main",
+    "headRefName": "orchlet/task-3dcb7548d16146a0",
+    "mergeable": "MERGEABLE",
+    "number": 3,
+    "state": "OPEN",
+    "statusCheckRollup": [
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-06T22:07:27Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/liltaket/orchlet-sandbox/actions/runs/34063079989/job/101566981993",
+        "name": "test",
+        "startedAt": "2026-09-06T22:07:21Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      },
+      {
+        "__typename": "StatusContext",
+        "context": "CodeRabbit",
+        "startedAt": "2026-09-06T22:07:24Z",
+        "state": "PENDING",
+        "targetUrl": ""
+      }
+    ],
+    "title": "feat: Add titleCase string utility in src/titleCase.js and tests in test/titleCase.test.js",
+    "url": "https://github.com/liltaket/orchlet-sandbox/pull/3"
+  }
+}
