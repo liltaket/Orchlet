@@ -1,0 +1,30 @@
+{
+  "name": "@orchlet/server",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -b",
+    "start": "node dist/index.js",
+    "dev": "node --watch src/index.ts"
+  },
+  "dependencies": {
+    "@orchlet/shared": "workspace:*",
+    "@orchlet/core": "workspace:*",
+    "@orchlet/usage": "workspace:*",
+    "@orchlet/routing": "workspace:*",
+    "@orchlet/context": "workspace:*",
+    "@orchlet/github": "workspace:*",
+    "@orchlet/providers": "workspace:*",
+    "@orchlet/notifications": "workspace:*",
+    "@orchlet/workflow-engine": "workspace:*",
+    "@orchlet/t3-adapter": "workspace:*",
+    "fastify": "^5.2.1",
+    "@fastify/websocket": "^11.0.2",
+    "@fastify/cors": "^10.0.2"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  }
+}

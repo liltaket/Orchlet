@@ -1,0 +1,25 @@
+{
+  "name": "orchlet-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Production-minded, open-source AI coding-agent orchestration control plane",
+  "license": "MIT",
+  "scripts": {
+    "build": "pnpm -r run build",
+    "test": "vitest run",
+    "lint": "pnpm -r run lint",
+    "dev:server": "pnpm --filter @orchlet/server run dev",
+    "dev:dashboard": "pnpm --filter @orchlet/dashboard run dev"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.5",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.7"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "better-sqlite3"
+    ]
+  }
+}
