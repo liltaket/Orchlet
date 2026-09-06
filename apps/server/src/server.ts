@@ -15,16 +15,28 @@ export async function createServer(engine = new WorkflowEngine()): Promise<Fasti
   const expectedToken = await AuthManager.getOrCreateToken();
   const sysLogger = new Logger({ prefix: "Server" });
 
-  // Restrict CORS strictly to loopback origins (localhost and 127.0.0.1)
+  // Configurable CORS origins: allows localhost, 127.0.0.1, and ORCHLET_ALLOWED_ORIGINS (e.g. Tailscale domains)
+  const configuredOrigins = (process.env.ORCHLET_ALLOWED_ORIGINS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+
   app.register(fastifyCors, {
     origin: (origin, cb) => {
       if (!origin) return cb(null, true);
       const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
       if (isLocalhost) {
-        cb(null, true);
-      } else {
-        cb(new Error("Not allowed by Orchlet loopback CORS policy"), false);
+        return cb(null, true);
       }
+      if (configuredOrigins.includes(origin)) {
+        return cb(null, true);
+      }
+      return cb(
+        new Error(
+          `Origin '${origin}' not allowed by Orchlet CORS policy. Set ORCHLET_ALLOWED_ORIGINS to allow remote/Tailscale origins.`
+        ),
+        false,
+      );
     },
   });
 
@@ -44,8 +56,13 @@ export async function createServer(engine = new WorkflowEngine()): Promise<Fasti
       if (AuthManager.validateToken(token)) return;
     }
 
-    // Query param check (useful for WebSocket connection initial handshake)
-    const query = req.query as { token?: string } | undefined;
+    // WebSocket ticket check (single-use, short-lived)
+    const query = req.query as { ticket?: string; token?: string } | undefined;
+    if (query?.ticket && AuthManager.validateAndConsumeWsTicket(query.ticket)) {
+      return;
+    }
+
+    // Backward-compatible query param check
     if (query?.token && AuthManager.validateToken(query.token)) {
       return;
     }
@@ -68,6 +85,12 @@ export async function createServer(engine = new WorkflowEngine()): Promise<Fasti
   app.get("/.well-known/orchlet/health", healthHandler);
   app.get("/health", healthHandler);
 
+  // Issue short-lived WebSocket ticket for browser stream connection
+  app.post("/api/auth/ws-ticket", async (req, reply) => {
+    const ticket = AuthManager.createWsTicket();
+    return { ticket, expiresInSeconds: 60 };
+  });
+
   // Task APIs
   app.post("/api/tasks", async (req, reply) => {
     const body = (req.body as any) || {};
@@ -76,7 +99,10 @@ export async function createServer(engine = new WorkflowEngine()): Promise<Fasti
     }
 
     try {
-      const task = await engine.createTask(body.intent, body.repoPath, body.config);
+      const task = await engine.createTask(body.intent, body.repoPath, {
+        routingMode: body.routingMode,
+        executionMode: body.executionMode,
+      });
       // Start async in background
       engine.startTask(task.id).catch((err: any) => {
         sysLogger.error(`Task ${task.id} failed asynchronously:`, err);

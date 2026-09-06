@@ -7,6 +7,22 @@ import { computeNextPollInterval } from "./backoff.js";
 
 const execFileAsync = promisify(execFile);
 
+export type BabysitterStatus =
+  | "READY_TO_MERGE"
+  | "MERGED"
+  | "WAITING_FOR_CI"
+  | "CI_FAILED"
+  | "CHANGES_REQUESTED"
+  | "CONFLICT"
+  | "TIMED_OUT";
+
+export interface BabysitResult {
+  merged: boolean;
+  readyToMerge?: boolean;
+  status: BabysitterStatus;
+  reason?: string;
+}
+
 export interface BabysitOptions {
   maxPollAttempts?: number;
   simulate?: boolean;
@@ -22,7 +38,7 @@ export class PRBabysitter implements IBabysitter {
       const { stdout } = await execFileAsync("gh", ["auth", "token"]);
       return stdout.trim();
     } catch {
-      return process.env.GITHUB_TOKEN || null;
+      return null;
     }
   }
 
@@ -34,6 +50,7 @@ export class PRBabysitter implements IBabysitter {
       headBranch: string;
       baseBranch?: string;
       draft?: boolean;
+      repo?: string;
     },
   ): Promise<{ prNumber: number; prUrl: string }> {
     this.logger.info(`Opening pull request for branch ${options.headBranch} in: ${repoPath}`);
@@ -47,6 +64,9 @@ export class PRBabysitter implements IBabysitter {
       "--head",
       options.headBranch,
     ];
+    if (options.repo) {
+      args.push("--repo", options.repo);
+    }
     if (options.baseBranch) {
       args.push("--base", options.baseBranch);
     }
@@ -129,7 +149,7 @@ export class PRBabysitter implements IBabysitter {
     repoName: string,
     prNumber: number,
     options: BabysitOptions = {},
-  ): Promise<{ merged: boolean; readyToMerge?: boolean; reason?: string }> {
+  ): Promise<BabysitResult> {
     const maxAttempts = options.maxPollAttempts || 5;
     const isSimulate = options.simulate ?? false;
     const autoMerge = options.autoMerge ?? false;
@@ -138,6 +158,11 @@ export class PRBabysitter implements IBabysitter {
       `Starting PR babysitter for ${repoOwner}/${repoName}#${prNumber} (simulate=${isSimulate}, autoMerge=${autoMerge})`
     );
 
+    let lastGateState: { status: BabysitterStatus; reason: string } = {
+      status: "WAITING_FOR_CI",
+      reason: "Waiting for checks to report.",
+    };
+
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
       let prState: PRGateInput;
       try {
@@ -145,64 +170,94 @@ export class PRBabysitter implements IBabysitter {
       } catch (err: any) {
         this.logger.warn(`Attempt ${attempt + 1}: could not query PR status: ${err.message}`);
         if (attempt === maxAttempts - 1) {
-          return { merged: false, reason: `PR status query failed: ${err.message}` };
+          return {
+            merged: false,
+            readyToMerge: false,
+            status: "TIMED_OUT",
+            reason: `PR status query failed: ${err.message}`,
+          };
         }
         const waitMs = options.pollDelayOverrideMs ?? computeNextPollInterval(attempt);
         await new Promise((resolve) => setTimeout(resolve, waitMs));
         continue;
       }
 
-      const gate = evaluateMergeGates(prState);
-
-      if (gate.canMerge) {
-        this.logger.info(`PR #${prNumber} passed all gates!`);
-        if (!autoMerge) {
-          this.logger.info(
-            `Auto-merge is false. PR #${prNumber} is verified and READY_TO_MERGE.`
-          );
-          return {
-            merged: false,
-            readyToMerge: true,
-            reason: "All checks and reviews passed. Ready for manual or policy merge.",
-          };
-        }
-
-        this.logger.info(`Auto-merge is enabled. Attempting merge for PR #${prNumber}...`);
-        if (isSimulate) {
-          this.logger.info(`Simulated merge success for PR #${prNumber}`);
-          return { merged: true, readyToMerge: true, reason: "Simulated merge completed." };
-        }
-
-        try {
-          await execFileAsync("gh", [
-            "pr",
-            "merge",
-            prNumber.toString(),
-            "--merge",
-            "--repo",
-            `${repoOwner}/${repoName}`,
-          ]);
-          this.logger.info(`PR #${prNumber} successfully merged!`);
-          return { merged: true, readyToMerge: true, reason: "PR merged into base branch." };
-        } catch (mergeErr: any) {
-          this.logger.error(`Merge command failed for PR #${prNumber}: ${mergeErr.message}`);
-          return { merged: false, readyToMerge: true, reason: `Merge failed: ${mergeErr.message}` };
-        }
+      // Check specific states
+      if (prState.reviews.some((r) => r.state === "CHANGES_REQUESTED")) {
+        lastGateState = {
+          status: "CHANGES_REQUESTED",
+          reason: "Changes requested by reviewer.",
+        };
+      } else if (prState.statusRollupState === "FAILURE" || prState.statusRollupState === "ERROR") {
+        lastGateState = {
+          status: "CI_FAILED",
+          reason: "One or more CI status checks reported failure.",
+        };
+      } else if (prState.mergeable === "CONFLICTING") {
+        lastGateState = {
+          status: "CONFLICT",
+          reason: "PR has merge conflicts.",
+        };
+      } else {
+        lastGateState = {
+          status: "WAITING_FOR_CI",
+          reason: `CI status is ${prState.statusRollupState || "PENDING"}. Waiting for completion.`,
+        };
       }
 
-      this.logger.info(`Gate check ${attempt + 1}/${maxAttempts} pending: ${gate.reason || "Gates not satisfied"}`);
+      const gateEvaluation = evaluateMergeGates(prState);
+
+      if (gateEvaluation.canMerge) {
+        this.logger.info(`All merge gates satisfied for PR #${prNumber}.`);
+
+        if (autoMerge) {
+          if (isSimulate) {
+            this.logger.info(`Simulated merge for PR #${prNumber}`);
+            return { merged: true, readyToMerge: true, status: "MERGED", reason: "Simulated merge completed." };
+          }
+          this.logger.info(`Auto-merge is enabled. Attempting merge via gh CLI...`);
+          try {
+            await execFileAsync("gh", [
+              "pr",
+              "merge",
+              prNumber.toString(),
+              "--repo",
+              `${repoOwner}/${repoName}`,
+              "--merge",
+              "--delete-branch",
+            ]);
+            this.logger.info(`PR #${prNumber} successfully merged.`);
+            return { merged: true, readyToMerge: true, status: "MERGED" };
+          } catch (mergeErr: any) {
+            this.logger.error(`Failed to auto-merge PR #${prNumber}: ${mergeErr.message}`);
+            return {
+              merged: false,
+              readyToMerge: true,
+              status: "READY_TO_MERGE",
+              reason: `Auto-merge execution failed: ${mergeErr.message}`,
+            };
+          }
+        }
+
+        return { merged: false, readyToMerge: true, status: "READY_TO_MERGE", reason: "Ready for manual or policy merge (all gates satisfied)." };
+      }
+
+      this.logger.info(
+        `Attempt ${attempt + 1}/${maxAttempts}: gates not yet satisfied (${gateEvaluation.reason || "Gates not met"}). Retrying...`
+      );
 
       if (attempt < maxAttempts - 1) {
         const waitMs = options.pollDelayOverrideMs ?? computeNextPollInterval(attempt);
-        this.logger.debug(`Backing off for ${waitMs}ms before next poll...`);
         await new Promise((resolve) => setTimeout(resolve, waitMs));
       }
     }
 
+    this.logger.warn(`PR #${prNumber} babysitting timed out after ${maxAttempts} attempts.`);
     return {
       merged: false,
       readyToMerge: false,
-      reason: `Exhausted ${maxAttempts} poll attempts waiting for CI/review gates.`,
+      status: lastGateState.status,
+      reason: lastGateState.reason,
     };
   }
 }

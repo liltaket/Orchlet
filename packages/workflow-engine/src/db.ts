@@ -2,7 +2,7 @@ import { DatabaseSync } from "node:sqlite";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import { generateId, Logger } from "@orchlet/shared";
-import type { Task, Checkpoint, TaskStatus } from "@orchlet/core";
+import type { Task, Checkpoint, TaskStatus, ExecutionMode } from "@orchlet/core";
 
 export class TaskStore {
   private db: DatabaseSync;
@@ -19,7 +19,43 @@ export class TaskStore {
 
   private migrate(): void {
     this.db.exec(`
-      CREATE TABLE IF NOT EXISTS tasks (\n        id TEXT PRIMARY KEY,\n        intent TEXT NOT NULL,\n        status TEXT NOT NULL,\n        attention_state TEXT NOT NULL,\n        routing_mode TEXT NOT NULL,\n        repo_path TEXT NOT NULL,\n        base_branch TEXT NOT NULL,\n        work_branch TEXT NOT NULL,\n        worktree_path TEXT,\n        commit_sha TEXT,\n        plan_json TEXT,\n        review_json TEXT,\n        verification_json TEXT,\n        model_audit_json TEXT,\n        pr_number INTEGER,\n        pr_url TEXT,\n        error TEXT,\n        created_at TEXT NOT NULL,\n        updated_at TEXT NOT NULL\n      );\n\n      CREATE TABLE IF NOT EXISTS checkpoints (\n        id TEXT PRIMARY KEY,\n        task_id TEXT NOT NULL,\n        step_index INTEGER NOT NULL,\n        status TEXT NOT NULL,\n        git_ref TEXT NOT NULL,\n        snapshot_json TEXT NOT NULL,\n        created_at TEXT NOT NULL,\n        FOREIGN KEY (task_id) REFERENCES tasks (id)\n      );\n\n      CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks (status);\n      CREATE INDEX IF NOT EXISTS idx_checkpoints_task ON checkpoints (task_id);\n    `);
+      CREATE TABLE IF NOT EXISTS tasks (
+        id TEXT PRIMARY KEY,
+        intent TEXT NOT NULL,
+        status TEXT NOT NULL,
+        attention_state TEXT NOT NULL,
+        routing_mode TEXT NOT NULL,
+        execution_mode TEXT NOT NULL DEFAULT 'REAL',
+        repo_path TEXT NOT NULL,
+        base_branch TEXT NOT NULL,
+        work_branch TEXT NOT NULL,
+        worktree_path TEXT,
+        commit_sha TEXT,
+        plan_json TEXT,
+        review_json TEXT,
+        verification_json TEXT,
+        model_audit_json TEXT,
+        pr_number INTEGER,
+        pr_url TEXT,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS checkpoints (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        step_index INTEGER NOT NULL,
+        status TEXT NOT NULL,
+        git_ref TEXT NOT NULL,
+        snapshot_json TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY (task_id) REFERENCES tasks (id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks (status);
+      CREATE INDEX IF NOT EXISTS idx_checkpoints_task ON checkpoints (task_id);
+    `);
 
     // Safe column migrations for existing SQLite stores
     try {
@@ -46,20 +82,24 @@ export class TaskStore {
     try {
       this.db.exec(`ALTER TABLE tasks ADD COLUMN pr_url TEXT;`);
     } catch {}
+    try {
+      this.db.exec(`ALTER TABLE tasks ADD COLUMN execution_mode TEXT;`);
+    } catch {}
   }
 
   saveTask(task: Task): void {
     const stmt = this.db.prepare(`
       INSERT INTO tasks (
-        id, intent, status, attention_state, routing_mode, repo_path, base_branch,
+        id, intent, status, attention_state, routing_mode, execution_mode, repo_path, base_branch,
         work_branch, worktree_path, commit_sha, plan_json, review_json,
         verification_json, model_audit_json, pr_number, pr_url, error, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
         intent = excluded.intent,
         status = excluded.status,
         attention_state = excluded.attention_state,
         routing_mode = excluded.routing_mode,
+        execution_mode = excluded.execution_mode,
         repo_path = excluded.repo_path,
         base_branch = excluded.base_branch,
         work_branch = excluded.work_branch,
@@ -81,6 +121,7 @@ export class TaskStore {
       task.status,
       task.attentionState,
       task.routingMode,
+      task.executionMode || "REAL",
       task.repoPath,
       task.baseBranch,
       task.workBranch,
@@ -186,6 +227,7 @@ export class TaskStore {
       status: row.status as TaskStatus,
       attentionState: row.attention_state,
       routingMode: row.routing_mode,
+      executionMode: (row.execution_mode as ExecutionMode) || "REAL",
       repoPath: row.repo_path,
       baseBranch: row.base_branch,
       workBranch: row.work_branch,

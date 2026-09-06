@@ -1,6 +1,22 @@
 import React, { useState, useEffect, useRef } from "react";
 
-interface ModelUsageRecord {
+export type ExecutionMode = "REAL" | "MOCK";
+export type AttentionState = "RUNNING" | "WAITING_ON_AGENTS" | "NEEDS_ATTENTION" | "SETTLED";
+export type TaskStatus =
+  | "PENDING"
+  | "PLANNING"
+  | "PLAN_APPROVED"
+  | "IMPLEMENTING"
+  | "VERIFYING"
+  | "REVIEWING"
+  | "REPAIRING"
+  | "COMMITTED"
+  | "PR_BABYSITTING"
+  | "READY_TO_MERGE"
+  | "COMPLETED"
+  | "FAILED";
+
+export interface ModelUsageRecord {
   role: string;
   provider: string;
   model: string;
@@ -10,19 +26,20 @@ interface ModelUsageRecord {
   timestamp: string;
 }
 
-interface VerificationResult {
+export interface VerificationResult {
   command: string;
   exitCode: number;
   durationMs: number;
   passed: boolean;
 }
 
-interface Task {
+export interface Task {
   id: string;
   intent: string;
-  status: string;
-  attentionState: "RUNNING" | "WAITING_ON_AGENTS" | "NEEDS_ATTENTION" | "SETTLED";
+  status: TaskStatus;
+  attentionState: AttentionState;
   routingMode: string;
+  executionMode?: ExecutionMode;
   repoPath: string;
   workBranch: string;
   commitSha?: string;
@@ -39,8 +56,12 @@ export function App() {
   const [intent, setIntent] = useState("");
   const [repoPath, setRepoPath] = useState(".");
   const [routingMode, setRoutingMode] = useState("AUTO");
+  const [executionMode, setExecutionMode] = useState<ExecutionMode>("REAL");
   const [daemonUrl, setDaemonUrl] = useState(() => {
-    return localStorage.getItem("orchlet_daemon_url") || (window.location.port === "4774" ? window.location.origin : "http://127.0.0.1:4774");
+    return (
+      localStorage.getItem("orchlet_daemon_url") ||
+      (window.location.port === "4774" ? window.location.origin : "http://127.0.0.1:4774")
+    );
   });
   const [authToken, setAuthToken] = useState(
     () => localStorage.getItem("orchlet_token") || "",
@@ -74,33 +95,63 @@ export function App() {
     }
   };
 
-  // WebSocket real-time subscription
+  // WebSocket real-time subscription with ticket-based auth
   useEffect(() => {
     fetchTasks();
 
-    const connectWs = () => {
+    let isMounted = true;
+    let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
+
+    const connectWs = async () => {
       try {
         const wsProtocol = cleanDaemonUrl.startsWith("https") ? "wss:" : "ws:";
         const host = cleanDaemonUrl.replace(/^https?:\/\//, "");
-        const tokenParam = authToken ? `?token=${encodeURIComponent(authToken.trim())}` : "";
-        const ws = new WebSocket(`${wsProtocol}//${host}/api/stream${tokenParam}`);
+        let wsUrl = `${wsProtocol}//${host}/api/stream`;
+
+        if (authToken) {
+          try {
+            const ticketRes = await fetch(`${cleanDaemonUrl}/api/auth/ws-ticket`, {
+              method: "POST",
+              headers: getHeaders(),
+            });
+            if (ticketRes.ok) {
+              const data = await ticketRes.json();
+              wsUrl += `?ticket=${data.ticket}`;
+            } else {
+              wsUrl += `?token=${encodeURIComponent(authToken.trim())}`;
+            }
+          } catch {
+            wsUrl += `?token=${encodeURIComponent(authToken.trim())}`;
+          }
+        }
+
+        if (!isMounted) return;
+        const ws = new WebSocket(wsUrl);
         wsRef.current = ws;
 
-        ws.onopen = () => setWsConnected(true);
+        ws.onopen = () => {
+          if (isMounted) setWsConnected(true);
+        };
         ws.onclose = () => {
-          setWsConnected(false);
-          setTimeout(connectWs, 4000);
+          if (isMounted) {
+            setWsConnected(false);
+            reconnectTimeout = setTimeout(connectWs, 4000);
+          }
         };
 
         ws.onmessage = (event) => {
           try {
             const msg = JSON.parse(event.data);
-            if (msg.type === "notification") {
-              const notif = msg.payload;
-              setNotifications((prev) => [
-                `[${new Date(notif.timestamp).toLocaleTimeString()}] ${notif.message}`,
-                ...prev.slice(0, 19),
-              ]);
+            if (msg.type === "NOTIFICATION" || msg.type === "notification") {
+              const notif = msg.data || msg.payload;
+              if (notif?.message) {
+                setNotifications((prev) => [
+                  `[${new Date().toLocaleTimeString()}] ${notif.message}`,
+                  ...prev.slice(0, 19),
+                ]);
+              }
+              fetchTasks();
+            } else if (msg.type === "TASK_UPDATE" || msg.type === "SNAPSHOT") {
               fetchTasks();
             }
           } catch {
@@ -108,12 +159,14 @@ export function App() {
           }
         };
       } catch {
-        setWsConnected(false);
+        if (isMounted) setWsConnected(false);
       }
     };
 
     connectWs();
     return () => {
+      isMounted = false;
+      if (reconnectTimeout) clearTimeout(reconnectTimeout);
       wsRef.current?.close();
     };
   }, [authToken, daemonUrl]);
@@ -121,46 +174,53 @@ export function App() {
   const handleCreateTask = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!intent.trim()) return;
+
     setLoading(true);
     try {
       const res = await fetch(`${cleanDaemonUrl}/api/tasks`, {
         method: "POST",
         headers: getHeaders(),
-        body: JSON.stringify({ intent, repoPath, routingMode }),
+        body: JSON.stringify({
+          intent,
+          repoPath,
+          routingMode,
+          executionMode,
+        }),
       });
+
       if (res.ok) {
-        const newTask = await res.json();
-        await fetch(`${cleanDaemonUrl}/api/tasks/${newTask.id}/start`, {
-          method: "POST",
-          headers: getHeaders(),
-          body: JSON.stringify({}),
-        });
         setIntent("");
         await fetchTasks();
+      } else {
+        const err = await res.json();
+        alert(`Failed to create task: ${err.error || "Unknown error"}`);
       }
+    } catch (err: any) {
+      alert(`Error connecting to daemon: ${err.message}`);
     } finally {
       setLoading(false);
     }
   };
 
-  const getStatusBadge = (status: string, attention: string) => {
-    let color = "#58a6ff";
-    if (status === "READY_TO_MERGE") color = "#a371f7";
-    else if (attention === "SETTLED") color = "#3fb950";
-    else if (attention === "NEEDS_ATTENTION") color = "#f85149";
-    else if (attention === "WAITING_ON_AGENTS") color = "#d29922";
+  const getStatusBadge = (status: TaskStatus, attention: AttentionState) => {
+    const isSettled = attention === "SETTLED";
+    const isNeedsAttention = attention === "NEEDS_ATTENTION";
+    const isFailed = status === "FAILED";
+
+    let bg = "#1f6feb";
+    if (isFailed) bg = "#da3633";
+    else if (isSettled) bg = "#238636";
+    else if (isNeedsAttention) bg = "#d29922";
 
     return (
       <span
         style={{
-          display: "inline-block",
           padding: "4px 8px",
           borderRadius: "12px",
           fontSize: "12px",
           fontWeight: 600,
-          backgroundColor: `${color}22`,
-          color,
-          border: `1px solid ${color}44`,
+          backgroundColor: bg,
+          color: "#ffffff",
         }}
       >
         {status} • {attention}
@@ -169,18 +229,20 @@ export function App() {
   };
 
   return (
-    <div style={{ maxWidth: "1120px", margin: "0 auto", padding: "36px 20px" }}>
-      <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "28px", flexWrap: "wrap", gap: "16px" }}>
+    <div style={{ maxWidth: "1200px", margin: "0 auto", padding: "24px", fontFamily: "system-ui, sans-serif", color: "#c9d1d9" }}>
+      <header style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "32px", borderBottom: "1px solid #30363d", paddingBottom: "16px" }}>
         <div>
-          <h1 style={{ margin: 0, fontSize: "28px", color: "#f0f6fc", display: "flex", alignItems: "center", gap: "10px" }}>
-            <span>⚡ Orchlet</span>
-            <span style={{ fontSize: "14px", fontWeight: "normal", color: "#8b949e" }}>v0.1.0 Control Plane</span>
+          <h1 style={{ margin: 0, fontSize: "24px", fontWeight: 700, color: "#f0f6fc", display: "flex", alignItems: "center", gap: "10px" }}>
+            <span>Orchlet</span>
+            <span style={{ fontSize: "12px", fontWeight: 400, padding: "2px 8px", backgroundColor: "#21262d", borderRadius: "12px", border: "1px solid #30363d" }}>
+              V1 Control Plane
+            </span>
           </h1>
-          <p style={{ margin: "6px 0 0 0", color: "#8b949e" }}>
-            Autonomous coding-agent orchestrator: plan, execute, verify, independent review, and merge-ready PRs.
+          <p style={{ margin: "4px 0 0 0", color: "#8b949e", fontSize: "14px" }}>
+            Autonomous coding agent orchestration with adversarial review and merge gates
           </p>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+        <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
           <input
             type="text"
             placeholder="Daemon URL"
@@ -239,7 +301,7 @@ export function App() {
             rows={3}
             value={intent}
             onChange={(e) => setIntent(e.target.value)}
-            placeholder="e.g. Refactor authentication token verification, add test suites, and open verified PR"
+            placeholder="e.g. Add clamp(value, min, max) utility with unit tests, execute verification, and open PR"
             style={{
               width: "100%",
               padding: "12px",
@@ -251,12 +313,12 @@ export function App() {
               boxSizing: "border-box",
             }}
           />
-          <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr auto", gap: "12px", alignItems: "center" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr auto", gap: "12px", alignItems: "center" }}>
             <input
               type="text"
               value={repoPath}
               onChange={(e) => setRepoPath(e.target.value)}
-              placeholder="Repository Path (e.g. . or /path/to/repo)"
+              placeholder="Repository Path (e.g. . or /repos/my-project)"
               style={{
                 backgroundColor: "#0d1117",
                 border: "1px solid #30363d",
@@ -278,10 +340,25 @@ export function App() {
                 fontSize: "13px",
               }}
             >
-              <option value="AUTO">AUTO (Cost-Performance Optimized)</option>
-              <option value="CHEAP">CHEAP (Budget-Constrained)</option>
-              <option value="QUALITY">QUALITY (High Capability)</option>
-              <option value="BEST">BEST (Maximum Reasoning)</option>
+              <option value="AUTO">AUTO (Balanced)</option>
+              <option value="CHEAP">CHEAP (Budget)</option>
+              <option value="QUALITY">QUALITY (High)</option>
+              <option value="BEST">BEST (Max Reasoning)</option>
+            </select>
+            <select
+              value={executionMode}
+              onChange={(e) => setExecutionMode(e.target.value as ExecutionMode)}
+              style={{
+                backgroundColor: "#0d1117",
+                border: "1px solid #30363d",
+                borderRadius: "6px",
+                padding: "8px 12px",
+                color: "#c9d1d9",
+                fontSize: "13px",
+              }}
+            >
+              <option value="REAL">REAL (OpenCode / AI)</option>
+              <option value="MOCK">MOCK (Test Sandbox)</option>
             </select>
             <button
               type="submit"
@@ -344,7 +421,22 @@ export function App() {
                 >
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "12px" }}>
                     <div style={{ fontWeight: 600, color: "#f0f6fc", fontSize: "15px" }}>{task.intent}</div>
-                    <div>{getStatusBadge(task.status, task.attentionState)}</div>
+                    <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+                      <span
+                        style={{
+                          fontSize: "11px",
+                          padding: "2px 6px",
+                          borderRadius: "4px",
+                          backgroundColor: task.executionMode === "REAL" ? "#1f6feb22" : "#8957e522",
+                          color: task.executionMode === "REAL" ? "#58a6ff" : "#d2a8ff",
+                          border: `1px solid ${task.executionMode === "REAL" ? "#1f6feb66" : "#8957e566"}`,
+                          fontWeight: 600,
+                        }}
+                      >
+                        {task.executionMode || "REAL"}
+                      </span>
+                      {getStatusBadge(task.status, task.attentionState)}
+                    </div>
                   </div>
 
                   <div style={{ fontSize: "12px", color: "#8b949e", display: "flex", gap: "16px", flexWrap: "wrap" }}>
@@ -365,7 +457,7 @@ export function App() {
                     <div style={{ marginTop: "4px", backgroundColor: "#0d1117", borderRadius: "6px", padding: "8px 12px", border: "1px solid #21262d" }}>
                       <div style={{ fontSize: "11px", color: "#8b949e", marginBottom: "4px", fontWeight: 600 }}>ROUTED AGENTS & MODELS AUDIT:</div>
                       <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
-                        {task.modelUsageAudit.map((m, idx) => (
+                        {task.modelUsageAudit.map((m: ModelUsageRecord, idx: number) => (
                           <span
                             key={idx}
                             style={{
@@ -377,7 +469,7 @@ export function App() {
                               border: "1px solid #30363d",
                             }}
                           >
-                            <strong style={{ color: "#58a6ff" }}>{m.role}</strong>: {m.model} ({m.durationMs}ms{m.tokens ? ` • ${m.tokens} tok` : ""})
+                            <strong style={{ color: "#58a6ff" }}>{m.role}</strong>: {m.provider}/{m.model} ({m.durationMs}ms{m.tokens ? ` • ${m.tokens} tok` : ""})
                           </span>
                         ))}
                       </div>
@@ -388,7 +480,7 @@ export function App() {
                   {task.verificationResults && task.verificationResults.length > 0 && (
                     <div style={{ fontSize: "12px", display: "flex", gap: "8px", alignItems: "center" }}>
                       <span style={{ color: "#8b949e" }}>Verification:</span>
-                      {task.verificationResults.map((v, i) => (
+                      {task.verificationResults.map((v: VerificationResult, i: number) => (
                         <span
                           key={i}
                           style={{
@@ -421,20 +513,20 @@ export function App() {
               border: "1px solid #30363d",
               borderRadius: "8px",
               padding: "16px",
-              height: "460px",
+              height: "400px",
               overflowY: "auto",
-              fontFamily: "ui-monospace, monospace",
+              fontFamily: "monospace",
               fontSize: "12px",
               display: "flex",
               flexDirection: "column",
-              gap: "8px",
+              gap: "6px",
             }}
           >
             {notifications.length === 0 ? (
-              <span style={{ color: "#484f58" }}>Waiting for attention stream events...</span>
+              <span style={{ color: "#484f58" }}>Waiting for event stream notifications...</span>
             ) : (
-              notifications.map((msg, index) => (
-                <div key={index} style={{ color: msg.includes("ATTENTION") ? "#f85149" : msg.includes("SETTLED") ? "#3fb950" : "#8b949e" }}>
+              notifications.map((msg, i) => (
+                <div key={i} style={{ color: "#8b949e", borderBottom: "1px solid #21262d", paddingBottom: "4px" }}>
                   {msg}
                 </div>
               ))

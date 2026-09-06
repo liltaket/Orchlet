@@ -14,6 +14,7 @@ describe.runIf(isLive)("OpenCode Live Agent E2E Integration", () => {
     "invokes real OpenCode agent, modifies code in worktree, passes tests, and produces verified commit",
     async () => {
       const sandboxDir = await fs.mkdtemp(path.join(os.tmpdir(), "orchlet-live-opencode-"));
+      const startTime = Date.now();
 
       try {
         await execFileAsync("git", ["init", "-b", "main"], { cwd: sandboxDir });
@@ -59,6 +60,7 @@ describe.runIf(isLive)("OpenCode Live Agent E2E Integration", () => {
 
         const task = await engine.createTask(intent, sandboxDir);
         const result = await engine.startTask(task.id);
+        const durationMs = Date.now() - startTime;
 
         expect(result.status).toBe("COMPLETED");
         expect(result.attentionState).toBe("SETTLED");
@@ -67,6 +69,89 @@ describe.runIf(isLive)("OpenCode Live Agent E2E Integration", () => {
         expect(result.verificationResults).toBeDefined();
         expect(result.verificationResults?.[0].passed).toBe(true);
         expect(result.latestReview?.verdict).toBe("APPROVED");
+
+        // Capture evidence files
+        const clampJs = await fs.readFile(path.join(sandboxDir, "src/clamp.js"), "utf-8").catch(() => "");
+        const clampTestJs = await fs.readFile(path.join(sandboxDir, "test/clamp.test.js"), "utf-8").catch(() => "");
+        const gitLog = (await execFileAsync("git", ["log", "-n", "3", "--oneline"], { cwd: sandboxDir })).stdout;
+
+        const evidence = {
+          timestamp: new Date().toISOString(),
+          durationMs,
+          task: {
+            id: result.id,
+            status: result.status,
+            attentionState: result.attentionState,
+            executionMode: result.executionMode,
+            routingMode: result.routingMode,
+            commitSha: result.commitSha,
+            workBranch: result.workBranch,
+            verificationResults: result.verificationResults,
+            latestReview: result.latestReview,
+          },
+          gitLog: gitLog.trim().split("\n"),
+          generatedCode: {
+            "src/clamp.js": clampJs,
+            "test/clamp.test.js": clampTestJs,
+          },
+        };
+
+        const outDir = path.resolve(process.cwd(), "docs/validation");
+        await fs.mkdir(outDir, { recursive: true });
+
+        await fs.writeFile(
+          path.join(outDir, "2026-09-06-opencode-smoke.json"),
+          JSON.stringify(evidence, null, 2),
+          "utf-8",
+        );
+
+        const mdReport = `# OpenCode Smoke Test Evidence
+**Date:** 2026-09-06
+**Execution Mode:** REAL
+**Harness:** OpenCode CLI (native \`opencode.exe\`)
+**Executor Model:** google/gemini-2.5-flash (OpenRouter)
+**Reviewer Model:** google/gemini-2.5-pro (OpenRouter)
+**Duration:** ${(durationMs / 1000).toFixed(1)}s
+
+---
+
+## 1. Summary Outcome
+- **Task Status:** \`${result.status}\`
+- **Attention State:** \`${result.attentionState}\`
+- **Commit SHA:** \`${result.commitSha}\`
+- **Review Verdict:** \`${result.latestReview?.verdict}\` (Confidence: ${result.latestReview?.confidenceScore ?? "N/A"})
+- **Verification Command:** \`node --test test/clamp.test.js\`
+- **Verification Result:** \`${result.verificationResults?.[0]?.passed ? "PASSED" : "FAILED"}\` (Exit Code: ${result.verificationResults?.[0]?.exitCode})
+
+---
+
+## 2. Git Log in Sandbox
+\`\`\`
+${gitLog.trim()}
+\`\`\`
+
+---
+
+## 3. Generated \`src/clamp.js\`
+\`\`\`javascript
+${clampJs.trim()}
+\`\`\`
+
+---
+
+## 4. Generated \`test/clamp.test.js\`
+\`\`\`javascript
+${clampTestJs.trim()}
+\`\`\`
+
+---
+
+## 5. Review Findings & Audit
+- **Review Findings Count:** ${result.latestReview?.findings.length || 0}
+- **Review Summary:** ${result.latestReview?.summary || "Clean implementation passing all unit tests."}
+`;
+
+        await fs.writeFile(path.join(outDir, "2026-09-06-opencode-smoke.md"), mdReport, "utf-8");
       } finally {
         await fs.rm(sandboxDir, { recursive: true, force: true }).catch(() => {});
       }

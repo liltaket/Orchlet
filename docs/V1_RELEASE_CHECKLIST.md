@@ -1,41 +1,43 @@
 # Orchlet V1 Release & Verification Checklist
 
-This checklist documents the truth-tested capabilities, operational verification, and security boundaries of the Orchlet V1 release.
+This checklist documents the truth-tested capabilities, operational verification, and security boundaries of the Orchlet V1 release. Every status marked **VERIFIED** is backed by empirical test logs and artifacts in `docs/validation/`.
 
 ---
 
 ## 1. Core Primary Objectives Verification Matrix
 
-| Objective | Requirement | Status | Verification Mechanism |
+| Objective | Requirement | Status | Verification Evidence / Mechanism |
 |---|---|---|---|
-| **1. GitHub Actions CI** | Green on clean clones with no pre-built `dist/` artifacts. Zero paid API spend. | **VERIFIED GREEN** | GitHub Actions workflow `.github/workflows/ci.yml` builds, typechecks, lints, and tests across all packages. |
-| **2. Real OpenCode Agent Execution** | OpenCode CLI invoked in isolated worktree, modifies code, respects model routing. | **VERIFIED** | `OpenCodeHarness` dispatches `opencode run [prompt] --dir <worktree> -m <provider>/<model> --auto --format json`. Opt-in smoke test via `pnpm test:live`. |
-| **3. Adversarial AI Reviewer** | Separately routed review model audits git diff against requirements without implementer self-bias. | **VERIFIED** | `IndependentReviewer` executes against git diff and verification logs. Context packet strictly excludes planner and implementer rationalization. |
-| **4. Repair Loop & Blocker Resolution** | P0/P1 findings or test failures block commits; capped repair loop (max 3) provisions targeted fixes. | **VERIFIED** | Unit tested in `remediation.test.ts`. Blocks merge until 0 P0/P1 findings remain. |
-| **5. Test Suite Verification Gate** | Automated verification runs and strictly gates success. Empty diff blocks commit. | **VERIFIED** | Non-empty diff check and 100% passing test execution enforced prior to `git commit`. |
-| **6. Verified Git Commit** | Genuine git commit created on dedicated work branch (`orchlet/task-<id>`). | **VERIFIED** | Verified 40-character SHA generated and stored in SQLite state store. |
-| **7. Real GitHub PR Integration** | Opens PR in user-controlled repository with real commit and task summary. | **VERIFIED** | `PRBabysitter.createPullRequest` dispatches real `gh pr create` with discovered remote origin identity. |
-| **8. Real Remote Repository Identity** | Discovers owner and repo from `git remote get-url origin` instead of placeholders. | **VERIFIED** | Tested in `remote.test.ts` across HTTPS, SSH, and port-based remote URLs. |
-| **9. Self-Hosted Docker Image** | Multi-stage Docker image includes Node 22, Git, GitHub CLI (`gh`), and `opencode-ai`. | **VERIFIED** | `Dockerfile` and `docker-compose.yml` configured with loopback binding, `/repos` volume, and healthcheck. |
-| **10. Truthful Feature Status** | README distinguishes working production features from experimental adapters. | **VERIFIED** | Feature status table in `README.md` and documentation audited. |
+| **1. GitHub Actions CI** | Green on clean clones with no pre-built `dist/` artifacts. Zero paid API spend. | **VERIFIED GREEN** | GitHub Actions workflow `.github/workflows/ci.yml` builds, typechecks, lints, and executes 39 offline tests across all packages. Run `34048498920`. |
+| **2. Real OpenCode Agent Execution** | OpenCode CLI invoked in isolated worktree, modifies code, respects model routing. | **VERIFIED** | Live smoke test passed in 15.3s (`google/gemini-2.5-flash`). Empirical evidence recorded in [`docs/validation/2026-09-06-opencode-smoke.md`](validation/2026-09-06-opencode-smoke.md). |
+| **3. Adversarial AI Reviewer** | Separately routed review model audits git diff against requirements without implementer self-bias. | **VERIFIED** | Live smoke test verified with `google/gemini-2.5-pro` via OpenRouter. Audit recorded in [`docs/validation/2026-09-06-opencode-smoke.md`](validation/2026-09-06-opencode-smoke.md). |
+| **4. Repair Loop & Blocker Resolution** | P0/P1 findings or test failures block commits; capped repair loop (max 3) provisions targeted fixes. | **VERIFIED** | Verified in `remediation.test.ts`. Blocks commits until 0 P0/P1 findings remain. |
+| **5. Test Suite Verification Gate** | Automated verification runs and strictly gates success. Empty diff blocks commit. | **VERIFIED** | Enforced prior to `git commit`. Non-empty diff check and 100% passing test execution confirmed. |
+| **6. Verified Git Commit** | Genuine git commit created on dedicated work branch (`orchlet/task-<id>`). | **VERIFIED** | Verified SHA `396063f9649acb5b2112f4df48c981a64f46d45e` generated on sandbox repo. |
+| **7. Real GitHub PR Integration** | Opens PR in user-controlled repository with real commit, babysits CI, settles as `READY_TO_MERGE`. | **VERIFIED** | Live test opened PR #2 on [`liltaket/orchlet-sandbox`](https://github.com/liltaket/orchlet-sandbox/pull/2), observed CI pass, and settled `READY_TO_MERGE`. Recorded in [`docs/validation/2026-09-06-github-pr-smoke.md`](validation/2026-09-06-github-pr-smoke.md). |
+| **8. Real Remote Repository Identity** | Discovers owner and repo from `git remote get-url origin` instead of placeholders. | **VERIFIED** | Unit tested in `remote.test.ts` across HTTPS, SSH, and port-based remote URLs. Confirmed live with `liltaket/orchlet-sandbox`. |
+| **9. Self-Hosted Docker Packaging** | Multi-stage Docker image includes Node 22, Git, GitHub CLI (`gh`), and `opencode-ai`. | **PACKAGED / SPECIFIED** (Runtime `BLOCKED_BY_ENVIRONMENT`) | `Dockerfile` and `docker-compose.yml` specified with loopback binding, `/repos` volume, and healthcheck. Container run blocked by host environment (Windows service stopped, non-elevated). Recorded in [`docs/validation/2026-09-06-docker-smoke.md`](validation/2026-09-06-docker-smoke.md). |
+| **10. Truthful Feature Status & Security Model** | Documents distinguish working production features from experimental adapters, with clear security model. | **VERIFIED** | Audited in `README.md` and [`docs/SECURITY_MODEL.md`](SECURITY_MODEL.md). |
 
 ---
 
 ## 2. Working vs. Experimental Capabilities
 
-### Fully Working (Tested & Truthful)
+### Fully Working (Empirically Verified)
 - **Workflow State Engine & SQLite Store**: Complete state machine (`PENDING` -> `PLANNING` -> `PLAN_APPROVED` -> `IMPLEMENTING` -> `VERIFYING` -> `REVIEWING` -> `REPAIRING` -> `COMMITTED` -> `PR_BABYSITTING` -> `READY_TO_MERGE` / `COMPLETED`).
+- **Dynamic Harness Resolution**: Resolves agent executor dynamically per repository configuration (`activeHarness: "opencode"`), strictly rejecting mock fallback in `REAL` execution mode.
 - **Ephemerally Sandboxed Worktrees**: Worktrees created under `.orchlet/worktrees/<task-id>` from base branch and pruned upon settlement.
 - **Audience-Separated Context Discovery**: Discovers `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, and Copilot files; builds tailored packets for implementer vs reviewer.
 - **Truthful Model Usage Accounting**: Model audit trail strictly records actual models executed with duration, tokens, and cost. Fake planner/architect entries eliminated.
 - **Model Router & Dynamic Role Overrides**: Supports `roleMappings` overrides and custom model catalog definitions.
 - **PR Babysitter Transitions**: Manages CI status checks, review states, `autoMerge: false` default, and `READY_TO_MERGE` terminal state.
-- **Fastify Control Plane Daemon**: Protected by local Bearer token authentication, loopback CORS protection, and WebSocket event stream.
+- **Fastify Control Plane Daemon**: Protected by local Bearer token authentication, single-use WebSocket tickets, loopback CORS protection, and WebSocket event stream.
 - **React Dashboard**: Live status dashboard displaying tasks, attention states, model usage audit trail, and verification outputs.
 
-### Experimental / Optional
+### Experimental / Blocked
 - **T3 Local RPC Adapter**: Experimental integration with locally running T3 agent instances (`.t3/config.json`).
 - **Autonomous Auto-Merge**: Configurable via `git.autoMerge: true` (defaults to `false` for human oversight).
+- **Docker Daemon Execution**: Container execution requires active Docker engine (`BLOCKED_BY_ENVIRONMENT` on current non-elevated host).
 
 ---
 
@@ -66,6 +68,12 @@ export OPENROUTER_API_KEY="your-key"
 pnpm test:live
 ```
 
+### Running Live GitHub PR End-to-End Test
+To run the full autonomous cycle opening a live pull request on `liltaket/orchlet-sandbox`:
+```bash
+pnpm test:pr
+```
+
 ### Launching the Daemon & Dashboard
 ```bash
 # Terminal 1: Daemon
@@ -78,7 +86,7 @@ Open `http://localhost:5173` to access the control plane. Bearer token is automa
 
 ### Running in Docker
 ```bash
-# Build and run containerized daemon
+# Build and run containerized daemon (requires running Docker daemon)
 docker compose up -d --build
 
 # Verify health endpoint

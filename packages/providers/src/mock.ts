@@ -5,11 +5,24 @@ import type {
   IAgentExecutor,
   AgentRequest,
   AgentResult,
+  ExecutorCapabilities,
   Plan,
   PlanStep,
 } from "@orchlet/core";
 
 export class MockAgentProvider implements IAgentExecutor {
+  readonly harnessName = "mock";
+  readonly capabilities: ExecutorCapabilities = {
+    roles: ["planner", "architect", "executor", "critic", "repairer"],
+    filesystem: true,
+    shell: false,
+    structuredOutput: true,
+    streaming: false,
+    modelSelection: true,
+    providerSelection: true,
+    isMock: true,
+  };
+
   private logger = new Logger({ prefix: "MockAgentProvider" });
 
   async execute(request: AgentRequest): Promise<AgentResult> {

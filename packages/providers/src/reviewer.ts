@@ -68,8 +68,8 @@ export class IndependentReviewer implements IReviewEngine {
     }
 
     // Do NOT spend API money in automated tests unless explicitly forced
-    const isTestEnv = process.env.NODE_ENV === "test" || Boolean(process.env.VITEST);
-    const canUseAI = (process.env.OPENROUTER_API_KEY && !isTestEnv) || this.forceAI;
+    const isTestEnv = (process.env.NODE_ENV === "test" || Boolean(process.env.VITEST)) && !process.env.TEST_LIVE;
+    const canUseAI = (Boolean(process.env.OPENROUTER_API_KEY) && !isTestEnv) || this.forceAI || Boolean(process.env.TEST_LIVE);
 
     if (canUseAI) {
       try {

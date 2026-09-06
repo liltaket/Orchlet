@@ -3,6 +3,8 @@ import type {
   AgentResult,
   ChatCompletionOptions,
   ChatCompletionResult,
+  ExecutionMode,
+  ExecutorCapabilities,
   Plan,
   ReviewVerdict,
   RoutingDecision,
@@ -13,7 +15,11 @@ import type {
 } from "./types.js";
 
 export interface IWorkflowEngine {
-  createTask(intent: string, repoPath: string, options?: { routingMode?: RoutingMode }): Promise<Task>;
+  createTask(
+    intent: string,
+    repoPath: string,
+    options?: { routingMode?: RoutingMode; executionMode?: ExecutionMode },
+  ): Promise<Task>;
   startTask(taskId: string): Promise<Task>;
   getTask(taskId: string): Promise<Task | null>;
   listTasks(): Task[];
@@ -43,6 +49,7 @@ export interface IWorktreeManager {
 export interface ReviewOptions {
   model?: string;
   provider?: string;
+  executionMode?: ExecutionMode;
 }
 
 export interface IReviewEngine {
@@ -69,7 +76,10 @@ export interface IBabysitter {
 }
 
 export interface IAgentExecutor {
+  readonly harnessName: string;
+  readonly capabilities: ExecutorCapabilities;
   execute(request: AgentRequest): Promise<AgentResult>;
+  generatePlan?(intent: string, taskId: string): Promise<Plan>;
 }
 
 export interface IVerificationRunner {

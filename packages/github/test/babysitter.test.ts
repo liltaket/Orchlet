@@ -20,6 +20,7 @@ describe("PRBabysitter Transitions", () => {
       maxPollAttempts: 2,
     });
 
+    expect(result.status).toBe("READY_TO_MERGE");
     expect(result.readyToMerge).toBe(true);
     expect(result.merged).toBe(false);
     expect(result.reason).toContain("Ready for manual or policy merge");
@@ -59,11 +60,12 @@ describe("PRBabysitter Transitions", () => {
     });
 
     expect(pollCount).toBe(2);
+    expect(result.status).toBe("READY_TO_MERGE");
     expect(result.readyToMerge).toBe(true);
     expect(result.merged).toBe(false);
   });
 
-  it("fails when CI checks fail", async () => {
+  it("distinguishes CI failure with status CI_FAILED", async () => {
     const babysitter = new PRBabysitter();
     vi.spyOn(babysitter, "getPRStatus").mockResolvedValue({
       state: "OPEN",
@@ -81,11 +83,12 @@ describe("PRBabysitter Transitions", () => {
       pollDelayOverrideMs: 1,
     });
 
+    expect(result.status).toBe("CI_FAILED");
     expect(result.readyToMerge).toBe(false);
     expect(result.merged).toBe(false);
   });
 
-  it("fails when reviews request changes", async () => {
+  it("distinguishes changes requested with status CHANGES_REQUESTED", async () => {
     const babysitter = new PRBabysitter();
     vi.spyOn(babysitter, "getPRStatus").mockResolvedValue({
       state: "OPEN",
@@ -103,6 +106,7 @@ describe("PRBabysitter Transitions", () => {
       pollDelayOverrideMs: 1,
     });
 
+    expect(result.status).toBe("CHANGES_REQUESTED");
     expect(result.readyToMerge).toBe(false);
     expect(result.merged).toBe(false);
   });
@@ -115,6 +119,7 @@ describe("PRBabysitter Transitions", () => {
       maxPollAttempts: 1,
     });
 
+    expect(result.status).toBe("MERGED");
     expect(result.readyToMerge).toBe(true);
     expect(result.merged).toBe(true);
     expect(result.reason).toContain("Simulated merge completed");

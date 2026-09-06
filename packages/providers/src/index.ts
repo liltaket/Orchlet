@@ -3,3 +3,4 @@ export * from "./mock.js";
 export * from "./openrouter.js";
 export * from "./opencode.js";
 export * from "./verification.js";
+export * from "./registry.js";

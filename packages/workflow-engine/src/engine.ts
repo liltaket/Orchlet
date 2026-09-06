@@ -12,6 +12,7 @@ import {
 } from "@orchlet/shared";
 import type {
   AttentionState,
+  ExecutionMode,
   IContextBuilder,
   IAgentExecutor,
   IVerificationRunner,
@@ -32,6 +33,8 @@ import {
   independentReviewer,
   IndependentReviewer,
   mockAgentProvider,
+  AgentExecutorRegistry,
+  agentExecutorRegistry,
   openCodeHarness,
   verificationRunner,
 } from "@orchlet/providers";
@@ -48,6 +51,7 @@ export interface EngineDependencies {
   babysitter?: PRBabysitter;
   agentExecutor?: IAgentExecutor;
   agentProvider?: IAgentExecutor;
+  executorRegistry?: AgentExecutorRegistry;
   verificationRunner?: IVerificationRunner;
   contextBuilder?: IContextBuilder;
   notifier?: NotificationManager;
@@ -60,7 +64,8 @@ export class WorkflowEngine implements IWorkflowEngine {
   private worktree: WorktreeManager;
   private reviewer: IndependentReviewer;
   private babysitter: PRBabysitter;
-  private agentExecutor: IAgentExecutor;
+  private customAgentExecutor?: IAgentExecutor;
+  private executorRegistry: AgentExecutorRegistry;
   private verificationRunner: IVerificationRunner;
   private contextBuilder: IContextBuilder;
   private notifier: NotificationManager;
@@ -79,15 +84,8 @@ export class WorkflowEngine implements IWorkflowEngine {
     this.notifier = deps.notifier || notificationManager;
     this.userConfig = deps.config;
 
-    if (deps.agentExecutor) {
-      this.agentExecutor = deps.agentExecutor;
-    } else if (deps.agentProvider) {
-      this.agentExecutor = deps.agentProvider;
-    } else if (deps.config?.activeHarness === "opencode") {
-      this.agentExecutor = openCodeHarness;
-    } else {
-      this.agentExecutor = mockAgentProvider;
-    }
+    this.executorRegistry = deps.executorRegistry || agentExecutorRegistry;
+    this.customAgentExecutor = deps.agentExecutor || deps.agentProvider;
   }
 
   subscribe(listener: (task: Task) => void): () => void {
@@ -110,7 +108,7 @@ export class WorkflowEngine implements IWorkflowEngine {
   async createTask(
     intent: string,
     repoPath: string,
-    options: { routingMode?: RoutingMode } = {},
+    options: { routingMode?: RoutingMode; executionMode?: ExecutionMode } = {},
   ): Promise<Task> {
     const id = generateId();
     const task: Task = {
@@ -119,6 +117,7 @@ export class WorkflowEngine implements IWorkflowEngine {
       status: "PENDING",
       attentionState: "RUNNING",
       routingMode: options.routingMode || "AUTO",
+      executionMode: options.executionMode || (process.env.VITEST && !process.env.TEST_LIVE ? "MOCK" : "REAL"),
       repoPath: path.resolve(repoPath),
       baseBranch: "main",
       workBranch: `orchlet/task-${id}`,
@@ -171,6 +170,10 @@ export class WorkflowEngine implements IWorkflowEngine {
     // Load runtime configuration
     const config = this.userConfig || (await ConfigManager.loadConfig(task.repoPath));
     task.modelUsageAudit = task.modelUsageAudit || [];
+    const activeHarness = config.activeHarness || "opencode";
+    const executionMode = task.executionMode || (process.env.VITEST && !process.env.TEST_LIVE ? "MOCK" : "REAL");
+    const executor = this.customAgentExecutor ??
+      this.executorRegistry.resolve(activeHarness, "executor", executionMode);
 
     try {
       // 1. CONTEXT DISCOVERY & PACKET GENERATION
@@ -201,7 +204,7 @@ export class WorkflowEngine implements IWorkflowEngine {
       this.logger.info(`Implementation routed to: ${execDecision.providerId}/${execDecision.modelId}`);
 
       implementerPacket.planSummary = task.plan.summary;
-      const execResult = await this.agentExecutor.execute({
+      const execResult = await executor.execute({
         taskId: task.id,
         role: "executor",
         userObjective: task.intent,
@@ -270,7 +273,7 @@ export class WorkflowEngine implements IWorkflowEngine {
         task.intent,
         verificationResults,
         reviewerPacket,
-        { model: criticDecision.modelId, provider: criticDecision.providerId },
+        { model: criticDecision.modelId, provider: criticDecision.providerId, executionMode },
       );
       task.latestReview = review;
       this.recordAudit(
@@ -329,7 +332,10 @@ export class WorkflowEngine implements IWorkflowEngine {
           { blockingFindings: blockers, planSummary: task.plan?.summary },
         );
 
-        const repairResult = await this.agentExecutor.execute({
+        const repairExecutor = this.customAgentExecutor ??
+          this.executorRegistry.resolve(activeHarness, "repairer", executionMode);
+
+        const repairResult = await repairExecutor.execute({
           taskId: task.id,
           role: "repairer",
           userObjective: `Resolve defects: ${blockers.map((b) => b.title).join("; ")}`,
@@ -377,7 +383,7 @@ export class WorkflowEngine implements IWorkflowEngine {
           task.intent,
           verificationResults,
           reviewerPacket,
-          { model: criticDecision.modelId, provider: criticDecision.providerId },
+          { model: criticDecision.modelId, provider: criticDecision.providerId, executionMode },
         );
         task.latestReview = review;
       }

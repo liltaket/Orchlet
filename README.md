@@ -42,7 +42,7 @@ Orchlet is a production-minded, open-source AI coding-agent orchestration contro
 | **Real Git Commits & Branch Management** | **Working** | Generates verified commits on work branch with full model audit log |
 | **PR Babysitting & Gate Evaluation** | **Working** | Evaluates CI/review gates, conservative `autoMerge: false` default |
 | **Remote Dashboard & WebSocket Stream** | **Working** | React + Vite UI with dynamic daemon URL, token auth, real-time events |
-| **Docker & Docker Compose Self-Hosting** | **Working** | Multi-stage Dockerfile and docker-compose deployment |
+| **Docker & Docker Compose Packaging** | **Packaged** | Multi-stage Dockerfile and docker-compose deployment |
 | **T3 Adapter Integration** | **Experimental** | Runtime discovery from `.t3` config and RPC turn dispatch |
 | **Organization Token Budget Quotas** | **Planned** | Hard monthly token spend limits per team/repo |
 
@@ -133,6 +133,8 @@ docker compose up -d --build
 ## Documentation & Architecture
 
 - [**System Architecture Specification**](docs/ARCHITECTURE.md)
+- [**Security Model & Self-Hosting Architecture**](docs/SECURITY_MODEL.md)
+- [**V1 Release & Verification Checklist**](docs/V1_RELEASE_CHECKLIST.md)
 - [**ADR-001: Autonomous Control Plane Architecture & Integration Strategy**](docs/adr/ADR-001-architecture-and-integration.md)
 - **Deep-Dive Research Reports**:
   - [T3 Code Runtime, RPC & Protocol Analysis](docs/research/t3.md)

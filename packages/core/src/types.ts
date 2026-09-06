@@ -22,6 +22,8 @@ export type AttentionState =
 
 export type RoutingMode = "AUTO" | "CHEAP" | "QUALITY" | "BEST";
 
+export type ExecutionMode = "REAL" | "MOCK";
+
 export type AgentRole =
   | "planner"
   | "architect"
@@ -31,6 +33,20 @@ export type AgentRole =
   | "babysitter";
 
 export type ModelTier = "fast" | "balanced" | "strong";
+
+export const SUPPORTED_REVIEWER_PROVIDERS = ["openrouter"] as const;
+export type SupportedReviewerProvider = typeof SUPPORTED_REVIEWER_PROVIDERS[number];
+
+export interface ExecutorCapabilities {
+  roles: AgentRole[];
+  filesystem: boolean;
+  shell: boolean;
+  structuredOutput: boolean;
+  streaming: boolean;
+  modelSelection: boolean;
+  providerSelection: boolean;
+  isMock: boolean;
+}
 
 export interface PlanStep {
   id: string;
@@ -194,6 +210,7 @@ export interface Task {
   status: TaskStatus;
   attentionState: AttentionState;
   routingMode: RoutingMode;
+  executionMode?: ExecutionMode;
   repoPath: string;
   baseBranch: string;
   workBranch: string;

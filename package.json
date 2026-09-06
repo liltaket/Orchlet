@@ -8,6 +8,7 @@
     "build": "pnpm -r run build",
     "test": "vitest run",
     "test:live": "cross-env TEST_LIVE=true vitest run packages/workflow-engine/test/opencode-live.test.ts",
+    "test:pr": "cross-env TEST_LIVE=true vitest run packages/workflow-engine/test/github-pr-live.test.ts",
     "orchlet:smoke": "cross-env TEST_LIVE=true vitest run packages/workflow-engine/test/opencode-live.test.ts",
     "lint": "pnpm -r run lint",
     "dev:server": "pnpm --filter @orchlet/server run dev",

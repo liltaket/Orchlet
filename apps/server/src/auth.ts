@@ -6,6 +6,7 @@ import { Logger } from "@orchlet/shared";
 
 export class AuthManager {
   private static token: string | null = null;
+  private static wsTickets = new Map<string, number>(); // ticket -> expiresAt timestamp
   private static logger = new Logger({ prefix: "AuthManager" });
 
   static async getOrCreateToken(): Promise<string> {
@@ -45,5 +46,37 @@ export class AuthManager {
   static validateToken(provided?: string | null): boolean {
     if (!this.token || !provided) return false;
     return this.token === provided.trim();
+  }
+
+  /**
+   * Issue a short-lived (60s), single-use WebSocket ticket for browser authentication.
+   * Avoids exposing bearer tokens in URLs or browser histories.
+   */
+  static createWsTicket(validityMs = 60_000): string {
+    // Purge expired tickets
+    const now = Date.now();
+    for (const [ticket, expiresAt] of this.wsTickets.entries()) {
+      if (now > expiresAt) {
+        this.wsTickets.delete(ticket);
+      }
+    }
+
+    const ticket = `wst_${randomBytes(16).toString("hex")}`;
+    this.wsTickets.set(ticket, now + validityMs);
+    return ticket;
+  }
+
+  /**
+   * Validates and consumes a single-use WebSocket ticket.
+   */
+  static validateAndConsumeWsTicket(ticket?: string | null): boolean {
+    if (!ticket) return false;
+    const expiresAt = this.wsTickets.get(ticket.trim());
+    if (!expiresAt) return false;
+
+    // Immediately consume ticket (one-time use)
+    this.wsTickets.delete(ticket.trim());
+
+    return Date.now() <= expiresAt;
   }
 }
