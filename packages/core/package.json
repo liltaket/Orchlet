@@ -12,7 +12,8 @@
   },
   "scripts": {
     "build": "tsc -b",
-    "clean": "rimraf dist"
+    "clean": "node -e \"import('node:fs').then(fs => fs.rmSync('dist', { recursive: true, force: true }))\"",
+    "lint": "tsc --noEmit"
   },
   "dependencies": {
     "@orchlet/shared": "workspace:*"

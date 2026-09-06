@@ -17,9 +17,10 @@ export class InstructionDiscoveryEngine {
   async discoverForPath(targetFilePath: string): Promise<DiscoveredInstruction[]> {
     const discovered: DiscoveredInstruction[] = [];
     let currentDir = path.dirname(path.resolve(targetFilePath));
-    const normalizedRoot = path.resolve(this.projectRoot);
+    const resolvedRoot = path.resolve(this.projectRoot);
+    const normalizedRootWithSep = resolvedRoot.endsWith(path.sep) ? resolvedRoot : resolvedRoot + path.sep;
 
-    while (currentDir.startsWith(normalizedRoot)) {
+    while (currentDir === resolvedRoot || currentDir.startsWith(normalizedRootWithSep)) {
       for (const filename of ["AGENTS.md", "ORCHLET.md", "CLAUDE.md"]) {
         const candidate = path.join(currentDir, filename);
         if (!this.loadedPaths.has(candidate)) {
@@ -34,8 +35,10 @@ export class InstructionDiscoveryEngine {
           }
         }
       }
-      if (currentDir === normalizedRoot) break;
-      currentDir = path.dirname(currentDir);
+      if (currentDir === resolvedRoot) break;
+      const parent = path.dirname(currentDir);
+      if (parent === currentDir) break; // Reached root of drive
+      currentDir = parent;
     }
 
     // Return nearest-first (closest directory to target file takes precedence)

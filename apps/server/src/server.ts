@@ -5,16 +5,58 @@ import { Logger } from "@orchlet/shared";
 import { WorkflowEngine } from "@orchlet/workflow-engine";
 import { usageManager } from "@orchlet/usage";
 import { notificationManager } from "@orchlet/notifications";
+import { AuthManager } from "./auth.js";
 
-export function createServer(engine = new WorkflowEngine()): FastifyInstance {
+export async function createServer(engine = new WorkflowEngine()): Promise<FastifyInstance> {
   const app = Fastify({
     logger: false,
   });
 
+  const expectedToken = await AuthManager.getOrCreateToken();
   const sysLogger = new Logger({ prefix: "Server" });
 
-  app.register(fastifyCors, { origin: true });
+  // Restrict CORS strictly to loopback origins (localhost and 127.0.0.1)
+  app.register(fastifyCors, {
+    origin: (origin, cb) => {
+      if (!origin) return cb(null, true);
+      const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin);
+      if (isLocalhost) {
+        cb(null, true);
+      } else {
+        cb(new Error("Not allowed by Orchlet loopback CORS policy"), false);
+      }
+    },
+  });
+
   app.register(fastifyWebsocket);
+
+  // Authentication hook for protected routes
+  app.addHook("onRequest", async (req, reply) => {
+    // Health check is public
+    if (req.url === "/.well-known/orchlet/health") {
+      return;
+    }
+
+    // Header check
+    const authHeader = req.headers.authorization;
+    if (authHeader && authHeader.startsWith("Bearer ")) {
+      const token = authHeader.slice(7).trim();
+      if (AuthManager.validateToken(token)) return;
+    }
+
+    // Query param check (useful for WebSocket connection initial handshake)
+    const query = req.query as { token?: string } | undefined;
+    if (query?.token && AuthManager.validateToken(query.token)) {
+      return;
+    }
+
+    // In local dev/test if bypass is requested via environment
+    if (process.env.ORCHLET_DISABLE_AUTH === "true") {
+      return;
+    }
+
+    return reply.status(401).send({ error: "Unauthorized: valid Orchlet Bearer token required" });
+  });
 
   // Health check
   app.get("/.well-known/orchlet/health", async () => {

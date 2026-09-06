@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { Logger, OrchletError } from "@orchlet/shared";
+import { Logger, OrchletError, ValidationError } from "@orchlet/shared";
 import type { IWorktreeManager } from "@orchlet/core";
 
 const execFileAsync = promisify(execFile);
@@ -15,8 +15,12 @@ export class WorktreeManager implements IWorktreeManager {
     taskId: string,
     baseBranch = "main",
   ): Promise<{ worktreePath: string; branchName: string }> {
+    if (!/^[a-zA-Z0-9_-]+$/.test(taskId)) {
+      throw new ValidationError(`Invalid taskId for worktree creation: ${taskId}`);
+    }
+
     const branchName = `orchlet/task-${taskId}`;
-    const worktreesBase = path.join(repoPath, ".orchlet", "worktrees");
+    const worktreesBase = path.join(path.resolve(repoPath), ".orchlet", "worktrees");
     const worktreePath = path.join(worktreesBase, `task-${taskId}`);
 
     await fs.mkdir(worktreesBase, { recursive: true });
@@ -60,7 +64,7 @@ export class WorktreeManager implements IWorktreeManager {
         cwd: worktreePath,
       });
       return stdout;
-    } catch (err: any) {
+    } catch {
       // Fallback to git diff HEAD or uncommitted diff
       const { stdout } = await execFileAsync("git", ["diff", "HEAD"], { cwd: worktreePath }).catch(() => ({ stdout: "" }));
       return stdout;

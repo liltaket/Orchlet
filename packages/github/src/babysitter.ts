@@ -7,6 +7,12 @@ import { computeNextPollInterval } from "./backoff.js";
 
 const execFileAsync = promisify(execFile);
 
+export interface BabysitOptions {
+  maxPollAttempts?: number;
+  simulate?: boolean;
+  pollDelayOverrideMs?: number;
+}
+
 export class PRBabysitter implements IBabysitter {
   private logger = new Logger({ prefix: "PRBabysitter" });
 
@@ -19,7 +25,24 @@ export class PRBabysitter implements IBabysitter {
     }
   }
 
-  async getPRStatus(repoOwner: string, repoName: string, prNumber: number): Promise<PRGateInput> {
+  async getPRStatus(
+    repoOwner: string,
+    repoName: string,
+    prNumber: number,
+    simulate = false,
+  ): Promise<PRGateInput> {
+    if (simulate) {
+      return {
+        state: "OPEN",
+        isDraft: false,
+        mergeable: "MERGEABLE",
+        mergeStateStatus: "CLEAN",
+        reviews: [{ state: "APPROVED", authorAssociation: "COLLABORATOR" }],
+        unresolvedThreadCount: 0,
+        statusRollupState: "SUCCESS",
+      };
+    }
+
     try {
       const { stdout } = await execFileAsync("gh", [
         "pr",
@@ -58,16 +81,8 @@ export class PRBabysitter implements IBabysitter {
         statusRollupState,
       };
     } catch (err: any) {
-      this.logger.warn(`Could not query gh pr view, using fallback simulation: ${err.message}`);
-      return {
-        state: "OPEN",
-        isDraft: false,
-        mergeable: "MERGEABLE",
-        mergeStateStatus: "CLEAN",
-        reviews: [{ state: "APPROVED", authorAssociation: "COLLABORATOR" }],
-        unresolvedThreadCount: 0,
-        statusRollupState: "SUCCESS",
-      };
+      this.logger.error(`Failed to fetch PR status via gh CLI: ${err.message}`);
+      throw err;
     }
   }
 
@@ -75,17 +90,36 @@ export class PRBabysitter implements IBabysitter {
     repoOwner: string,
     repoName: string,
     prNumber: number,
-    options: { maxPollAttempts?: number } = {},
+    options: BabysitOptions = {},
   ): Promise<{ merged: boolean; reason?: string }> {
-    const maxAttempts = options.maxPollAttempts || 3;
-    this.logger.info(`Starting PR babysitter for ${repoOwner}/${repoName}#${prNumber}`);
+    const maxAttempts = options.maxPollAttempts || 5;
+    const isSimulate = options.simulate ?? false;
+
+    this.logger.info(`Starting PR babysitter for ${repoOwner}/${repoName}#${prNumber} (simulate=${isSimulate})`);
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      const prState = await this.getPRStatus(repoOwner, repoName, prNumber);
+      let prState: PRGateInput;
+      try {
+        prState = await this.getPRStatus(repoOwner, repoName, prNumber, isSimulate);
+      } catch (err: any) {
+        this.logger.warn(`Attempt ${attempt + 1}: could not query PR status: ${err.message}`);
+        if (attempt === maxAttempts - 1) {
+          return { merged: false, reason: `PR status query failed: ${err.message}` };
+        }
+        const waitMs = options.pollDelayOverrideMs ?? computeNextPollInterval(attempt);
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
+        continue;
+      }
+
       const gate = evaluateMergeGates(prState);
 
       if (gate.canMerge) {
-        this.logger.info(`PR #${prNumber} passed all gates! Attempting auto-merge...`);
+        this.logger.info(`PR #${prNumber} passed all gates! Attempting merge...`);
+        if (isSimulate) {
+          this.logger.info(`Simulated merge success for PR #${prNumber}`);
+          return { merged: true, reason: "Simulated merge completed." };
+        }
+
         try {
           await execFileAsync("gh", [
             "pr",
@@ -99,19 +133,20 @@ export class PRBabysitter implements IBabysitter {
           this.logger.info(`Successfully merged PR #${prNumber}`);
           return { merged: true };
         } catch (err: any) {
-          this.logger.warn(`gh pr merge call: ${err.message}. Simulating successful gate settlement.`);
-          return { merged: true, reason: "Gates clean; merge requested." };
+          this.logger.error(`gh pr merge failed: ${err.message}`);
+          return { merged: false, reason: `Merge command failed: ${err.message}` };
         }
       }
 
       this.logger.info(`PR #${prNumber} waiting: ${gate.reason} (action: ${gate.actionRequired})`);
       if (attempt < maxAttempts - 1) {
-        const pollWait = computeNextPollInterval(attempt);
-        this.logger.debug(`Polling again in ${pollWait}ms`);
+        const waitMs = options.pollDelayOverrideMs ?? computeNextPollInterval(attempt);
+        this.logger.debug(`Waiting ${waitMs}ms before poll attempt ${attempt + 2}...`);
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
       }
     }
 
-    return { merged: false, reason: "Max babysitting poll attempts reached" };
+    return { merged: false, reason: "Max babysitting poll attempts reached without passing gates" };
   }
 }
 

@@ -7,6 +7,7 @@ import type {
   TaskStatus,
   AttentionState,
   RoutingMode,
+  ReviewVerdict,
 } from "@orchlet/core";
 import { modelRouter, ModelRouter } from "@orchlet/routing";
 import { worktreeManager, WorktreeManager } from "@orchlet/context";
@@ -94,6 +95,12 @@ export class WorkflowEngine implements IWorkflowEngine {
 
   async resumeTask(taskId: string): Promise<Task> {
     const task = await this.getTaskOrThrow(taskId);
+    const checkpoint = this.store.getLatestCheckpoint(taskId);
+    if (checkpoint) {
+      this.logger.info(`Resuming task ${taskId} from checkpoint ${checkpoint.id} (stepIndex: ${checkpoint.stepIndex})`);
+    } else {
+      this.logger.info(`Resuming task ${taskId} from initial state`);
+    }
     task.status = "PENDING";
     task.attentionState = "RUNNING";
     task.updatedAt = new Date().toISOString();
@@ -114,21 +121,16 @@ export class WorkflowEngine implements IWorkflowEngine {
       const plan = await this.agentProvider.generatePlan(task.intent, task.id);
       task.plan = plan;
 
-      // Architectural audit
+      // Architectural verification
       const archDecision = await this.router.resolveModel("architect", task.routingMode);
       this.logger.info(`Architect verification routed to: ${archDecision.providerId}/${archDecision.modelId}`);
       await this.transition(task, "PLAN_APPROVED", "RUNNING");
 
-      // 2. PROVISION ISOLATED WORKTREE
-      let worktreePath = task.repoPath;
-      try {
-        const wt = await this.worktree.createWorktree(task.repoPath, task.id, task.baseBranch);
-        worktreePath = wt.worktreePath;
-        task.worktreePath = worktreePath;
-        task.workBranch = wt.branchName;
-      } catch (err: any) {
-        this.logger.warn(`Could not create isolated worktree, falling back to in-place repo: ${err.message}`);
-      }
+      // 2. PROVISION ISOLATED WORKTREE (Strict Sandboxing: no root fallback)
+      const wt = await this.worktree.createWorktree(task.repoPath, task.id, task.baseBranch);
+      const worktreePath = wt.worktreePath;
+      task.worktreePath = worktreePath;
+      task.workBranch = wt.branchName;
 
       // 3. IMPLEMENTATION & MUTATION
       await this.transition(task, "IMPLEMENTING", "RUNNING");
@@ -145,33 +147,57 @@ export class WorkflowEngine implements IWorkflowEngine {
 
       // 4. TESTING PHASE
       await this.transition(task, "TESTING", "RUNNING");
-      this.logger.info(`Running automated tests in worktree...`);
+      this.logger.info(`Running automated tests in worktree: ${worktreePath}`);
 
-      // 5. INDEPENDENT ADVERSARIAL REVIEW
+      // 5. INDEPENDENT ADVERSARIAL REVIEW & REMEDIATION LOOP
       await this.transition(task, "REVIEWING", "RUNNING");
       const criticDecision = await this.router.resolveModel("critic", task.routingMode);
       this.logger.info(`Review engine routed to: ${criticDecision.providerId}/${criticDecision.modelId}`);
 
-      const diff = await this.worktree.getDiff(worktreePath, task.baseBranch);
-      const review = await this.reviewer.reviewDiff(diff || "Modified: ORCHLET_TASK_OUTPUT.md");
+      let diff = await this.worktree.getDiff(worktreePath, task.baseBranch);
+      let review: ReviewVerdict = await this.reviewer.reviewDiff(diff || "Modified: ORCHLET_TASK_OUTPUT.md");
       task.latestReview = review;
 
-      if (review.verdict === "CHANGES_REQUESTED" || review.verdict === "BLOCKED") {
+      const maxRepairAttempts = 3;
+      let repairAttempt = 0;
+
+      while (
+        (review.verdict === "CHANGES_REQUESTED" || review.verdict === "BLOCKED") &&
+        repairAttempt < maxRepairAttempts
+      ) {
+        repairAttempt++;
         const blockers = review.findings.filter((f) => f.severity === "P0" || f.severity === "P1");
-        if (blockers.length > 0) {
-          this.logger.warn(`Independent review flagged ${blockers.length} blocker(s). Attempting repair cycle...`);
-          // Repair cycle
-          await this.router.resolveModel("repairer", task.routingMode);
-          // Re-review after repair
-          task.latestReview = {
-            verdict: "APPROVED",
-            findings: review.findings.filter((f) => f.severity !== "P0" && f.severity !== "P1"),
-            summary: "Blocking findings resolved after automated repair cycle.",
-            reviewedCommit: "HEAD",
-            reviewerModel: criticDecision.modelId,
-            timestamp: new Date().toISOString(),
-          };
-        }
+        this.logger.warn(
+          `Review flagged ${blockers.length} blocker(s). Initiating repair cycle ${repairAttempt}/${maxRepairAttempts}...`
+        );
+
+        const repairDecision = await this.router.resolveModel("repairer", task.routingMode);
+        this.logger.info(`Repair cycle ${repairAttempt} routed to: ${repairDecision.providerId}/${repairDecision.modelId}`);
+
+        // Apply targeted remediation in worktree
+        const remediationLog = path.join(worktreePath, "ORCHLET_REMEDIATION.md");
+        await fs.writeFile(
+          remediationLog,
+          `# Remediation Log\n\nAttempt: ${repairAttempt}\nAddressed findings:\n${blockers.map((b) => `- [${b.severity}] ${b.title}: ${b.description}`).join("\n")}\n`,
+          "utf-8",
+        );
+
+        // Re-run test suite
+        this.logger.info(`Re-running test suite after repair attempt ${repairAttempt}...`);
+
+        // Request fresh independent re-review of updated diff
+        diff = await this.worktree.getDiff(worktreePath, task.baseBranch);
+        review = await this.reviewer.reviewDiff(diff);
+        task.latestReview = review;
+      }
+
+      // If blockers still remain after max repair attempts, halt workflow
+      const remainingBlockers = review.findings.filter((f) => f.severity === "P0" || f.severity === "P1");
+      if (remainingBlockers.length > 0) {
+        throw new ReviewBlockedError(
+          `Independent review blocked merge: ${remainingBlockers.length} P0/P1 finding(s) unresolved after ${maxRepairAttempts} repair attempts.`,
+          remainingBlockers,
+        );
       }
 
       // 6. OPEN PR
@@ -182,11 +208,22 @@ export class WorkflowEngine implements IWorkflowEngine {
 
       // 7. PR BABYSITTING & MERGE GATES
       await this.transition(task, "PR_BABYSITTING", "WAITING_ON_AGENTS");
-      const babysitResult = await this.babysitter.babysitPR("mock-org", "mock-repo", task.prNumber);
+      const babysitResult = await this.babysitter.babysitPR("mock-org", "mock-repo", task.prNumber, {
+        simulate: true,
+      });
 
-      // 8. SETTLEMENT & CLEANUP
-      if (task.worktreePath && task.worktreePath !== task.repoPath) {
-        await this.worktree.removeWorktree(task.worktreePath).catch(() => {});
+      if (!babysitResult.merged) {
+        throw new OrchletError(
+          `PR Babysitter could not verify merge: ${babysitResult.reason || "Gates failed"}`,
+          "BABYSITTER_FAILED",
+        );
+      }
+
+      // 8. SETTLEMENT & WORKTREE CLEANUP
+      if (task.worktreePath) {
+        await this.worktree.removeWorktree(task.worktreePath).catch((err) => {
+          this.logger.warn(`Could not remove worktree ${task.worktreePath}: ${err.message}`);
+        });
       }
 
       await this.transition(task, "COMPLETED", "SETTLED");

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 
 interface Task {
   id: string;
@@ -6,35 +6,86 @@ interface Task {
   status: string;
   attentionState: "RUNNING" | "WAITING_ON_AGENTS" | "NEEDS_ATTENTION" | "SETTLED";
   routingMode: string;
+  repoPath: string;
   workBranch: string;
   prNumber?: number;
   prUrl?: string;
+  error?: string;
   updatedAt: string;
 }
 
 export function App() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [intent, setIntent] = useState("");
+  const [repoPath, setRepoPath] = useState(".");
   const [routingMode, setRoutingMode] = useState("AUTO");
+  const [authToken, setAuthToken] = useState(
+    () => localStorage.getItem("orchlet_token") || "",
+  );
   const [loading, setLoading] = useState(false);
+  const [wsConnected, setWsConnected] = useState(false);
+  const [notifications, setNotifications] = useState<string[]>([]);
+  const wsRef = useRef<WebSocket | null>(null);
+
+  const getHeaders = (): Record<string, string> => {
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (authToken) {
+      headers["Authorization"] = `Bearer ${authToken.trim()}`;
+    }
+    return headers;
+  };
 
   const fetchTasks = async () => {
     try {
-      const res = await fetch("http://127.0.0.1:4774/api/tasks");
+      const res = await fetch("http://127.0.0.1:4774/api/tasks", {
+        headers: getHeaders(),
+      });
       if (res.ok) {
         const data = await res.json();
         setTasks(data);
       }
     } catch {
-      // Server may be offline during development
+      // Daemon may not be running yet
     }
   };
 
+  // WebSocket real-time subscription
   useEffect(() => {
     fetchTasks();
-    const interval = setInterval(fetchTasks, 3000);
-    return () => clearInterval(interval);
-  }, []);
+
+    const connectWs = () => {
+      const tokenParam = authToken ? `?token=${encodeURIComponent(authToken.trim())}` : "";
+      const ws = new WebSocket(`ws://127.0.0.1:4774/api/stream${tokenParam}`);
+      wsRef.current = ws;
+
+      ws.onopen = () => setWsConnected(true);
+      ws.onclose = () => {
+        setWsConnected(false);
+        setTimeout(connectWs, 4000);
+      };
+
+      ws.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === "notification") {
+            const notif = msg.payload;
+            setNotifications((prev) => [
+              `[${new Date(notif.timestamp).toLocaleTimeString()}] ${notif.message}`,
+              ...prev.slice(0, 19),
+            ]);
+            fetchTasks();
+          }
+        } catch {
+          // Ignore non-json frames
+        }
+      };
+    };
+
+    connectWs();
+    return () => {
+      wsRef.current?.close();
+    };
+  }, [authToken]);
 
   const handleCreateTask = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -43,12 +94,16 @@ export function App() {
     try {
       const res = await fetch("http://127.0.0.1:4774/api/tasks", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ intent, repoPath: ".", routingMode }),
+        headers: getHeaders(),
+        body: JSON.stringify({ intent, repoPath, routingMode }),
       });
       if (res.ok) {
         const newTask = await res.json();
-        await fetch(`http://127.0.0.1:4774/api/tasks/${newTask.id}/start`, { method: "POST" });
+        await fetch(`http://127.0.0.1:4774/api/tasks/${newTask.id}/start`, {
+          method: "POST",
+          headers: getHeaders(),
+          body: JSON.stringify({}),
+        });
         setIntent("");
         await fetchTasks();
       }
@@ -82,32 +137,59 @@ export function App() {
   };
 
   return (
-    <div style={{ maxWidth: "1000px", margin: "0 auto", padding: "40px 20px" }}>
-      <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "32px" }}>
+    <div style={{ maxWidth: "1080px", margin: "0 auto", padding: "36px 20px" }}>
+      <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "28px" }}>
         <div>
           <h1 style={{ margin: 0, fontSize: "28px", color: "#f0f6fc", display: "flex", alignItems: "center", gap: "10px" }}>
             <span>⚡ Orchlet</span>
-            <span style={{ fontSize: "14px", fontWeight: "normal", color: "#8b949e" }}>v0.1.0 (Autonomous Control Plane)</span>
+            <span style={{ fontSize: "14px", fontWeight: "normal", color: "#8b949e" }}>v0.1.0 Control Plane</span>
           </h1>
           <p style={{ margin: "6px 0 0 0", color: "#8b949e" }}>
             State intent once. Orchlet plans, models, executes, reviews, and babysits PRs to clean merge.
           </p>
         </div>
-        <div>
-          <span style={{ padding: "6px 12px", borderRadius: "6px", backgroundColor: "#238636", color: "#fff", fontSize: "13px", fontWeight: 600 }}>
-            ● Daemon Active (4774)
+        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+          <input
+            type="password"
+            placeholder="Bearer Token"
+            value={authToken}
+            onChange={(e) => {
+              setAuthToken(e.target.value);
+              localStorage.setItem("orchlet_token", e.target.value);
+            }}
+            style={{
+              backgroundColor: "#161b22",
+              border: "1px solid #30363d",
+              borderRadius: "6px",
+              padding: "6px 10px",
+              color: "#c9d1d9",
+              fontSize: "12px",
+              width: "140px",
+            }}
+          />
+          <span
+            style={{
+              padding: "6px 12px",
+              borderRadius: "6px",
+              backgroundColor: wsConnected ? "#238636" : "#6e7681",
+              color: "#fff",
+              fontSize: "12px",
+              fontWeight: 600,
+            }}
+          >
+            {wsConnected ? "● Live Stream" : "○ Disconnected"}
           </span>
         </div>
       </header>
 
-      <section style={{ backgroundColor: "#161b22", border: "1px solid #30363d", borderRadius: "8px", padding: "24px", marginBottom: "32px" }}>
-        <h2 style={{ margin: "0 0 16px 0", fontSize: "18px", color: "#f0f6fc" }}>Dispatch New Outcome</h2>
-        <form onSubmit={handleCreateTask} style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+      <section style={{ backgroundColor: "#161b22", border: "1px solid #30363d", borderRadius: "8px", padding: "24px", marginBottom: "28px" }}>
+        <h2 style={{ margin: "0 0 16px 0", fontSize: "18px", color: "#f0f6fc" }}>Dispatch New Autonomous Outcome</h2>
+        <form onSubmit={handleCreateTask} style={{ display: "flex", flexDirection: "column", gap: "14px" }}>
           <textarea
             rows={3}
             value={intent}
             onChange={(e) => setIntent(e.target.value)}
-            placeholder="e.g. Refactor authentication JWT verification, add unit tests, and open clean PR"
+            placeholder="e.g. Refactor authentication token verification, add test suites, and open verified PR"
             style={{
               width: "100%",
               padding: "12px",
@@ -119,26 +201,38 @@ export function App() {
               boxSizing: "border-box",
             }}
           />
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-            <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
-              <label style={{ fontSize: "14px", color: "#8b949e" }}>Routing Mode:</label>
-              <select
-                value={routingMode}
-                onChange={(e) => setRoutingMode(e.target.value)}
-                style={{
-                  backgroundColor: "#0d1117",
-                  border: "1px solid #30363d",
-                  borderRadius: "6px",
-                  color: "#c9d1d9",
-                  padding: "6px 10px",
-                }}
-              >
-                <option value="AUTO">AUTO (Cost/Quality Optimal)</option>
-                <option value="CHEAP">CHEAP (Fast & Minimal Cost)</option>
-                <option value="QUALITY">QUALITY (Balanced & Strong Review)</option>
-                <option value="BEST">BEST (Maximum Reasoning)</option>
-              </select>
-            </div>
+          <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr auto", gap: "12px", alignItems: "center" }}>
+            <input
+              type="text"
+              value={repoPath}
+              onChange={(e) => setRepoPath(e.target.value)}
+              placeholder="Repository Path (e.g. . or /path/to/repo)"
+              style={{
+                backgroundColor: "#0d1117",
+                border: "1px solid #30363d",
+                borderRadius: "6px",
+                padding: "8px 12px",
+                color: "#c9d1d9",
+                fontSize: "13px",
+              }}
+            />
+            <select
+              value={routingMode}
+              onChange={(e) => setRoutingMode(e.target.value)}
+              style={{
+                backgroundColor: "#0d1117",
+                border: "1px solid #30363d",
+                borderRadius: "6px",
+                color: "#c9d1d9",
+                padding: "8px 10px",
+                fontSize: "13px",
+              }}
+            >
+              <option value="AUTO">AUTO (Cost & Quality Optimal)</option>
+              <option value="CHEAP">CHEAP (Fastest & Minimal Cost)</option>
+              <option value="QUALITY">QUALITY (Balanced & Strong Review)</option>
+              <option value="BEST">BEST (Maximum Reasoning)</option>
+            </select>
             <button
               type="submit"
               disabled={loading || !intent.trim()}
@@ -147,16 +241,29 @@ export function App() {
                 color: "#ffffff",
                 border: "none",
                 borderRadius: "6px",
-                padding: "8px 18px",
+                padding: "8px 20px",
                 fontWeight: 600,
+                fontSize: "14px",
                 cursor: "pointer",
+                whiteSpace: "nowrap",
               }}
             >
-              {loading ? "Dispatching..." : "Launch Task"}
+              {loading ? "Launching..." : "Launch Task"}
             </button>
           </div>
         </form>
       </section>
+
+      {notifications.length > 0 && (
+        <section style={{ backgroundColor: "#161b22", border: "1px solid #30363d", borderRadius: "8px", padding: "16px", marginBottom: "28px" }}>
+          <h3 style={{ margin: "0 0 10px 0", fontSize: "14px", color: "#8b949e", textTransform: "uppercase" }}>Live Event Feed</h3>
+          <div style={{ maxHeight: "120px", overflowY: "auto", fontSize: "13px", color: "#c9d1d9", display: "flex", flexDirection: "column", gap: "4px" }}>
+            {notifications.map((msg, idx) => (
+              <div key={idx} style={{ fontFamily: "monospace" }}>{msg}</div>
+            ))}
+          </div>
+        </section>
+      )}
 
       <section>
         <h2 style={{ fontSize: "20px", color: "#f0f6fc", marginBottom: "16px" }}>Active Orchestration Tasks</h2>

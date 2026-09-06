@@ -94,23 +94,27 @@ export class ModelRouter implements IModelRouter {
       fallbackHops++;
     }
 
-    // Fallback: If entire tier is constrained, borrow candidate from adjacent tier
-    const adjacentTier: ModelTier = tier === "strong" ? "balanced" : "fast";
-    const fallbackCandidates = this.catalog[adjacentTier] || [];
-    if (fallbackCandidates.length > 0) {
-      const fallback = fallbackCandidates[0];
-      this.logger.warn(`Degrading tier for role=${role} from ${tier} to ${adjacentTier} due to quota constraints`);
-      return {
-        providerId: fallback.providerId,
-        modelId: fallback.modelId,
-        tier: fallback.tier,
-        estimatedCostWeight: fallback.costWeight,
-        reason: "cross_tier_degraded_fallback",
-        fallbackHops,
-      };
+    // Fallback: If entire primary tier is constrained, search adjacent tier candidates with health validation
+    const adjacentTiers: ModelTier[] = tier === "strong" ? ["balanced", "fast"] : ["fast", "balanced"];
+    for (const adjTier of adjacentTiers) {
+      const fallbackCandidates = this.catalog[adjTier] || [];
+      for (const fallback of fallbackCandidates) {
+        if (this.usage.isProviderHealthy(fallback.providerId)) {
+          this.logger.warn(`Degrading tier for role=${role} from ${tier} to ${adjTier} (provider: ${fallback.providerId}) due to quota constraints`);
+          return {
+            providerId: fallback.providerId,
+            modelId: fallback.modelId,
+            tier: fallback.tier,
+            estimatedCostWeight: fallback.costWeight,
+            reason: "cross_tier_healthy_fallback",
+            fallbackHops,
+          };
+        }
+        fallbackHops++;
+      }
     }
 
-    throw new OrchletError(`No healthy model found for role ${role} in mode ${mode}`, "NO_HEALTHY_MODEL");
+    throw new OrchletError(`No healthy model found across any tier for role ${role} in mode ${mode}`, "NO_HEALTHY_MODEL");
   }
 }
 

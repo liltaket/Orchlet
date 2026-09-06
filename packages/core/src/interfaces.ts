@@ -41,7 +41,12 @@ export interface IReviewEngine {
 }
 
 export interface IBabysitter {
-  babysitPR(repoOwner: string, repoName: string, prNumber: number): Promise<{
+  babysitPR(
+    repoOwner: string,
+    repoName: string,
+    prNumber: number,
+    options?: { maxPollAttempts?: number; simulate?: boolean },
+  ): Promise<{
     merged: boolean;
     reason?: string;
   }>;
