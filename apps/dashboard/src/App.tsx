@@ -33,6 +33,29 @@ export interface VerificationResult {
   passed: boolean;
 }
 
+export interface TaskSpendSummary {
+  totalCostUsd: number;
+  executorCostUsd?: number;
+  reviewerCostUsd?: number;
+  repairCostUsd?: number;
+  callCount: number;
+  totalTokens: number;
+}
+
+export interface RoutingRationale {
+  role: string;
+  selectedModel: string;
+  selectedProvider: string;
+  tier?: string;
+  costClass?: string;
+  candidates?: string[];
+  estimatedCostUsd?: number;
+  remainingTaskBudgetUsd?: number;
+  reasons: string[];
+  subscriptionQuotaState?: string;
+  timestamp: string;
+}
+
 export interface Task {
   id: string;
   intent: string;
@@ -46,6 +69,9 @@ export interface Task {
   prNumber?: number;
   prUrl?: string;
   error?: string;
+  perTaskBudgetUsd?: number;
+  spend?: TaskSpendSummary;
+  routingRationales?: RoutingRationale[];
   modelUsageAudit?: ModelUsageRecord[];
   verificationResults?: VerificationResult[];
   updatedAt: string;
@@ -57,6 +83,8 @@ export function App() {
   const [repoPath, setRepoPath] = useState(".");
   const [routingMode, setRoutingMode] = useState("AUTO");
   const [executionMode, setExecutionMode] = useState<ExecutionMode>("REAL");
+  const [perTaskBudget, setPerTaskBudget] = useState("");
+  const [budgetSpend, setBudgetSpend] = useState<{ todayUsd: number; monthUsd: number } | null>(null);
   const [daemonUrl, setDaemonUrl] = useState(() => {
     return (
       localStorage.getItem("orchlet_daemon_url") ||
@@ -95,9 +123,26 @@ export function App() {
     }
   };
 
+  const fetchUsage = async () => {
+    try {
+      const res = await fetch(`${cleanDaemonUrl}/api/usage`, {
+        headers: getHeaders(),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.budgetSpend) {
+          setBudgetSpend(data.budgetSpend);
+        }
+      }
+    } catch {
+      // Daemon may not be reachable
+    }
+  };
+
   // WebSocket real-time subscription with ticket-based auth
   useEffect(() => {
     fetchTasks();
+    fetchUsage();
 
     let isMounted = true;
     let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -153,8 +198,10 @@ export function App() {
                 ]);
               }
               fetchTasks();
+              fetchUsage();
             } else if (msg.type === "TASK_UPDATE" || msg.type === "SNAPSHOT") {
               fetchTasks();
+              fetchUsage();
             }
           } catch {
             // Ignore non-json frames
@@ -187,12 +234,15 @@ export function App() {
           repoPath,
           routingMode,
           executionMode,
+          perTaskBudgetUsd: perTaskBudget.trim() ? parseFloat(perTaskBudget) : undefined,
         }),
       });
 
       if (res.ok) {
         setIntent("");
+        setPerTaskBudget("");
         await fetchTasks();
+        await fetchUsage();
       } else {
         const err = await res.json();
         alert(`Failed to create task: ${err.error || "Unknown error"}`);
@@ -245,6 +295,21 @@ export function App() {
           </p>
         </div>
         <div style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+          {budgetSpend && (
+            <span
+              style={{
+                padding: "6px 10px",
+                borderRadius: "6px",
+                backgroundColor: "#161b22",
+                border: "1px solid #30363d",
+                fontSize: "12px",
+                color: "#8b949e",
+              }}
+            >
+              Spend: <strong style={{ color: "#79c0ff" }}>${budgetSpend.todayUsd.toFixed(3)}</strong> today /{" "}
+              <strong style={{ color: "#7ee787" }}>${budgetSpend.monthUsd.toFixed(3)}</strong> mo
+            </span>
+          )}
           <input
             type="text"
             placeholder="Daemon URL"
@@ -315,12 +380,28 @@ export function App() {
               boxSizing: "border-box",
             }}
           />
-          <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr auto", gap: "12px", alignItems: "center" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr 1fr 1fr auto", gap: "12px", alignItems: "center" }}>
             <input
               type="text"
               value={repoPath}
               onChange={(e) => setRepoPath(e.target.value)}
               placeholder="Repository Path (e.g. . or /repos/my-project)"
+              style={{
+                backgroundColor: "#0d1117",
+                border: "1px solid #30363d",
+                borderRadius: "6px",
+                padding: "8px 12px",
+                color: "#c9d1d9",
+                fontSize: "13px",
+              }}
+            />
+            <input
+              type="number"
+              step="0.05"
+              min="0"
+              value={perTaskBudget}
+              onChange={(e) => setPerTaskBudget(e.target.value)}
+              placeholder="Budget ($ max)"
               style={{
                 backgroundColor: "#0d1117",
                 border: "1px solid #30363d",
@@ -453,6 +534,32 @@ export function App() {
                       </span>
                     )}
                   </div>
+
+                  {/* Budget & Spend Summary */}
+                  <div style={{ fontSize: "12px", color: "#8b949e", display: "flex", gap: "16px", flexWrap: "wrap", backgroundColor: "#0d1117", padding: "6px 10px", borderRadius: "4px" }}>
+                    <span>Budget: <strong style={{ color: "#f0f6fc" }}>{task.perTaskBudgetUsd != null ? `$${task.perTaskBudgetUsd.toFixed(2)}` : "Unlimited"}</strong></span>
+                    <span>Total Spend: <strong style={{ color: "#79c0ff" }}>${task.spend?.totalCostUsd?.toFixed(4) ?? "0.0000"}</strong></span>
+                    {task.spend && (
+                      <span>Tokens: <strong style={{ color: "#d2a8ff" }}>{task.spend.totalTokens}</strong> ({task.spend.callCount} calls)</span>
+                    )}
+                  </div>
+
+                  {/* Routing Rationales & Transparency */}
+                  {task.routingRationales && task.routingRationales.length > 0 && (
+                    <div style={{ marginTop: "2px", backgroundColor: "#0d1117", borderRadius: "6px", padding: "8px 12px", border: "1px solid #21262d" }}>
+                      <div style={{ fontSize: "11px", color: "#8b949e", marginBottom: "4px", fontWeight: 600 }}>ROUTING DECISIONS & RATIONALE:</div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: "4px" }}>
+                        {task.routingRationales.map((r: RoutingRationale, idx: number) => (
+                          <div key={idx} style={{ fontSize: "11px", color: "#8b949e" }}>
+                            <strong style={{ color: "#58a6ff" }}>{r.role}</strong> → <span style={{ color: "#7ee787" }}>{r.selectedModel}</span> ({r.costClass || "AUTO"}{r.estimatedCostUsd != null ? `, est: $${r.estimatedCostUsd}` : ""})
+                            {r.reasons && r.reasons.length > 0 && (
+                              <span style={{ marginLeft: "6px", color: "#8b949e" }}>[{r.reasons.join(", ")}]</span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
 
                   {/* Model Execution Audit Trail */}
                   {task.modelUsageAudit && task.modelUsageAudit.length > 0 && (

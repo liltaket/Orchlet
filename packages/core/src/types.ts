@@ -20,7 +20,73 @@ export type AttentionState =
   | "NEEDS_ATTENTION"
   | "SETTLED";
 
-export type RoutingMode = "AUTO" | "CHEAP" | "QUALITY" | "BEST";
+export type RoutingMode = "AUTO" | "CHEAP" | "QUALITY" | "BEST" | "MANUAL";
+
+export type CostClass =
+  | "FREE"
+  | "TINY"
+  | "CHEAP"
+  | "MODERATE"
+  | "EXPENSIVE"
+  | "PREMIUM"
+  | "SUBSCRIPTION";
+
+export type ModelCapability =
+  | "coding"
+  | "reasoning"
+  | "structuredOutput"
+  | "toolUse"
+  | "longContext"
+  | "frontend"
+  | "review"
+  | "fast"
+  | "multimodal";
+
+export type SubscriptionQuotaState =
+  | "ABUNDANT"
+  | "HEALTHY"
+  | "CONSTRAINED"
+  | "EXHAUSTED"
+  | "UNKNOWN";
+
+export interface BudgetConfig {
+  mode?: "balanced" | "strict" | "permissive";
+  perTaskUsd?: number;
+  dailyUsd?: number;
+  monthlyUsd?: number;
+  warnAtPercent?: number;
+  hardStopAtPercent?: number;
+  roleLimits?: {
+    executor?: number;
+    reviewer?: number;
+    repairer?: number;
+    reserve?: number;
+  };
+}
+
+export interface TaskSpendSummary {
+  totalCostUsd: number;
+  executorCostUsd: number;
+  reviewerCostUsd: number;
+  repairCostUsd: number;
+  callCount: number;
+  totalTokens: number;
+  costConfidence: "EXACT" | "ESTIMATED" | "UNKNOWN";
+}
+
+export interface RoutingRationale {
+  role: AgentRole;
+  selectedModel: string;
+  selectedProvider: string;
+  tier: ModelTier;
+  costClass?: CostClass;
+  candidates: string[];
+  estimatedCostUsd?: number;
+  remainingTaskBudgetUsd?: number;
+  reasons: string[];
+  subscriptionQuotaState?: SubscriptionQuotaState;
+  timestamp: string;
+}
 
 export type ExecutionMode = "REAL" | "MOCK";
 
@@ -187,13 +253,27 @@ export interface ModelConfigEntry {
   provider: string;
   model: string;
   tier: ModelTier;
+  costClass?: CostClass;
   strengths?: string[];
+  capabilities?: ModelCapability[];
   costWeight?: number;
+  pricing?: {
+    promptPerToken: number;
+    completionPerToken: number;
+  };
+  contextLength?: number;
+  discoveredAt?: string;
+  discoverySource?: string;
 }
 
 export interface OrchletConfig {
+  routingMode?: RoutingMode;
+  budget?: BudgetConfig;
   models?: Record<string, ModelConfigEntry>;
   roleMappings?: Record<string, { tier?: ModelTier; model?: string; provider?: string }>;
+  preferredModels?: string[];
+  excludedModels?: string[];
+  maxCostClass?: CostClass;
   git?: GitConfig;
   verification?: string[];
   activeHarness?: "opencode" | "openrouter" | "mock";
@@ -233,6 +313,11 @@ export interface Task {
   prNumber?: number;
   prUrl?: string;
   error?: string;
+  budget?: BudgetConfig;
+  perTaskBudgetUsd?: number;
+  spend?: TaskSpendSummary;
+  routingRationales?: RoutingRationale[];
+  roleMappings?: Record<string, { tier?: ModelTier; model?: string; provider?: string }>;
   createdAt: string;
   updatedAt: string;
 }

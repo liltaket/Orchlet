@@ -5,3 +5,4 @@ export * from "./opencode.js";
 export * from "./verification.js";
 export * from "./registry.js";
 export * from "./reviewer-registry.js";
+export * from "./catalog-discovery.js";

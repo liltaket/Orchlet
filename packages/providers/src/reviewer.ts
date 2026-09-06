@@ -217,9 +217,20 @@ export class IndependentReviewer implements IReviewEngine {
     let instructions = "";
     if (packet?.contextBundle?.files) {
       instructions = packet.contextBundle.files
-        .map((f: ContextFile) => `### From ${f.relativePath}:\n${f.content}`)
+        .map((f: ContextFile) => {
+          const content =
+            f.content.length > 12000
+              ? `${f.content.slice(0, 12000)}\n...[content truncated to 12k chars for reviewer token budget]...`
+              : f.content;
+          return `### From ${f.relativePath}:\n${content}`;
+        })
         .join("\n\n");
     }
+
+    const safeDiff =
+      diff.length > 60000
+        ? `${diff.slice(0, 60000)}\n\n...[diff truncated to 60k chars for reviewer token budget]...`
+        : diff;
 
     const systemPrompt = `You are an expert, adversarial, independent code reviewer for Orchlet.
 Your job is to thoroughly audit the provided git diff against the user's objective and repository instructions.
@@ -266,7 +277,7 @@ ${testSummary}
 
 # GIT DIFF TO AUDIT
 \`\`\`diff
-${diff}
+${safeDiff}
 \`\`\``;
 
     const response = await reviewerProvider.completeReview({

@@ -1,0 +1,56 @@
+{
+  "timestamp": "2026-09-06T22:40:19.399Z",
+  "testName": "Production Daemon HTTP -> Real GitHub PR",
+  "durationMs": 283380,
+  "taskId": "6ce46828367f4529",
+  "executionMode": "REAL",
+  "finalStatus": "READY_TO_MERGE",
+  "finalAttentionState": "SETTLED",
+  "commitSha": "eaf6cdeb10411ac616fb087d40281364d4a74796",
+  "prNumber": 5,
+  "prUrl": "https://github.com/liltaket/orchlet-sandbox/pull/5",
+  "requestedExecutorModel": "z-ai/glm-5.3-flash",
+  "actualExecutorModel": "z-ai/glm-5.3-flash",
+  "requestedReviewerModel": "google/gemini-3.8-flash",
+  "actualReviewerModel": "google/gemini-3.8-flash",
+  "reviewerTokens": 4610,
+  "reviewerCostUsd": 0.0113775,
+  "verificationResults": [
+    {
+      "command": "npm test",
+      "exitCode": 0,
+      "durationMs": 532,
+      "stdoutTail": "> orchlet-sandbox@1.0.0 test\n> node --test test/*.test.js\n\n✔ sandbox baseline sanity check (0.5943ms)\n✔ slugify converts basic strings to lowercase kebab slugs (0.8529ms)\n✔ slugify trims and collapses whitespace and punctuation (0.1166ms)\n✔ slugify strips diacritics from accented characters (0.7098ms)\n✔ slugify keeps numbers and mixed alphanumeric input (0.1343ms)\n✔ slugify supports a custom separator (0.1416ms)\n✔ slugify handles edge cases (0.1093ms)\n✔ slugify throws on invalid input (0.4206ms)\n✔ slugify has a default export (0.1211ms)\nℹ tests 9\nℹ suites 0\nℹ pass 9\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 88.0484",
+      "stderrTail": "",
+      "passed": true
+    }
+  ],
+  "githubPr": {
+    "baseRefName": "main",
+    "headRefName": "orchlet/task-6ce46828367f4529",
+    "mergeable": "MERGEABLE",
+    "number": 5,
+    "state": "OPEN",
+    "statusCheckRollup": [
+      {
+        "__typename": "CheckRun",
+        "completedAt": "2026-09-06T22:37:03Z",
+        "conclusion": "SUCCESS",
+        "detailsUrl": "https://github.com/liltaket/orchlet-sandbox/actions/runs/34064533313/job/101570862052",
+        "name": "test",
+        "startedAt": "2026-09-06T22:36:56Z",
+        "status": "COMPLETED",
+        "workflowName": "CI"
+      },
+      {
+        "__typename": "StatusContext",
+        "context": "CodeRabbit",
+        "startedAt": "2026-09-06T22:40:15Z",
+        "state": "SUCCESS",
+        "targetUrl": ""
+      }
+    ],
+    "title": "feat: Add slugify string utility in src/slugify.js and tests in test/slugify.test.js",
+    "url": "https://github.com/liltaket/orchlet-sandbox/pull/5"
+  }
+}

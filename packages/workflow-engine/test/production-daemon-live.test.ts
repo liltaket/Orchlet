@@ -38,7 +38,7 @@ describe.runIf(isLive)("Production Daemon HTTP End-to-End Live Validation", () =
       const startTime = Date.now();
 
       try {
-        const intent = `Add titleCase string utility in src/titleCase.js and tests in test/titleCase.test.js`;
+        const intent = `Add slugify string utility in src/slugify.js and tests in test/slugify.test.js`;
 
         // 2. Submit task via standard HTTP POST /api/tasks
         const postRes = await fetch(`${baseUrl}/api/tasks`, {
@@ -62,7 +62,7 @@ describe.runIf(isLive)("Production Daemon HTTP End-to-End Live Validation", () =
 
         // 3. Poll task status over HTTP
         let finalTask: any = null;
-        const maxPollTimeMs = 300000; // 5 minutes
+        const maxPollTimeMs = 420000; // 7 minutes (sufficient for CodeRabbit review + GitHub Actions)
         const pollIntervalMs = 3000;
         const pollStart = Date.now();
 
@@ -131,6 +131,15 @@ describe.runIf(isLive)("Production Daemon HTTP End-to-End Live Validation", () =
         expect(ghPr.number).toBe(finalTask.prNumber);
         expect(ghPr.state).toBe("OPEN");
 
+        // Verify CI gates: when settled as READY_TO_MERGE, no check is still PENDING
+        if (finalTask.status === "READY_TO_MERGE") {
+          const rollup = ghPr.statusCheckRollup || [];
+          const hasPending = rollup.some(
+            (c: any) => c.status === "IN_PROGRESS" || c.status === "QUEUED" || c.state === "PENDING"
+          );
+          expect(hasPending).toBe(false);
+        }
+
         const durationMs = Date.now() - startTime;
 
         // 6. Save structured validation artifact
@@ -148,6 +157,8 @@ describe.runIf(isLive)("Production Daemon HTTP End-to-End Live Validation", () =
           commitSha: finalTask.commitSha,
           prNumber: finalTask.prNumber,
           prUrl: finalTask.prUrl,
+          spend: finalTask.spend,
+          routingRationales: finalTask.routingRationales,
           requestedExecutorModel: executorAudit.requestedModel,
           actualExecutorModel: executorAudit.actualModel,
           requestedReviewerModel: criticAudit.requestedModel,
@@ -159,13 +170,13 @@ describe.runIf(isLive)("Production Daemon HTTP End-to-End Live Validation", () =
         };
 
         await fs.writeFile(
-          path.join(outDir, "2026-09-06-production-daemon-pr.json"),
+          path.join(outDir, "2026-09-07-production-daemon-pr.json"),
           JSON.stringify(validationRecord, null, 2),
           "utf-8",
         );
 
         const mdReport = `# Production Daemon HTTP to Real GitHub PR Validation Record
-**Date:** 2026-09-06
+**Date:** 2026-09-07
 **Execution Path:** Production Fastify Daemon (\`POST /api/tasks\`) -> Dynamic Harness Resolution -> Real OpenCode -> Real Verification -> Real AI Reviewer -> Git Commit -> Push -> GitHub PR -> CI Observation -> READY_TO_MERGE
 **Duration:** ${(durationMs / 1000).toFixed(1)}s
 
@@ -179,6 +190,7 @@ describe.runIf(isLive)("Production Daemon HTTP End-to-End Live Validation", () =
 - **Final Status:** \`${finalTask.status}\`
 - **Attention State:** \`${finalTask.attentionState}\`
 - **Verified Commit SHA:** \`${finalTask.commitSha}\`
+- **Total Task Spend:** $${finalTask.spend?.totalCostUsd?.toFixed(5) ?? "0.00000"} (${finalTask.spend?.totalTokens ?? 0} tokens)
 
 ---
 
@@ -201,6 +213,7 @@ describe.runIf(isLive)("Production Daemon HTTP End-to-End Live Validation", () =
 - **State:** \`${ghPr.state}\`
 - **Mergeable:** \`${ghPr.mergeable}\`
 - **CI Status Check Rollup:** \`${JSON.stringify(ghPr.statusCheckRollup || [])}\`
+- **Status Rollup Correctness:** Non-pending gate rollup validated before settling as READY_TO_MERGE.
 
 ---
 
@@ -208,12 +221,12 @@ describe.runIf(isLive)("Production Daemon HTTP End-to-End Live Validation", () =
 ${finalTask.verificationResults?.map((v: any) => `- Command: \`${v.command}\` (exit code: ${v.exitCode}, ${v.durationMs}ms) -> **${v.passed ? "PASSED" : "FAILED"}**`).join("\n")}
 `;
 
-        await fs.writeFile(path.join(outDir, "2026-09-06-production-daemon-pr.md"), mdReport, "utf-8");
-        console.log("Validation artifact saved to docs/validation/2026-09-06-production-daemon-pr.md");
+        await fs.writeFile(path.join(outDir, "2026-09-07-production-daemon-pr.md"), mdReport, "utf-8");
+        console.log("Validation artifact saved to docs/validation/2026-09-07-production-daemon-pr.md");
       } finally {
         await server.close();
       }
     },
-    360000, // 6 minute test timeout
+    480000, // 8 minute test timeout
   );
 });

@@ -1,0 +1,24 @@
+﻿{
+  "activeHarness": "opencode",
+  "routingMode": "AUTO",
+  "git": {
+    "push": false,
+    "openPr": false,
+    "autoMerge": false,
+    "baseBranch": "main"
+  },
+  "verification": ["npm test"],
+  "budget": {
+    "perTaskUsd": 0.5,
+    "dailyUsd": 5.0,
+    "monthlyUsd": 50.0,
+    "hardStopAtPercent": 100
+  },
+  "roleMappings": {
+    "executor": { "provider": "openrouter", "model": "z-ai/glm-5.3-flash" },
+    "critic": { "provider": "openrouter", "model": "google/gemini-3.8-flash" },
+    "repairer": { "provider": "openrouter", "model": "z-ai/glm-5.3-flash" }
+  },
+  "preferredModels": ["z-ai/glm-5.3-flash", "google/gemini-3.8-flash"],
+  "excludedModels": []
+}

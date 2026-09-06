@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { Logger } from "@orchlet/shared";
 import type { IBabysitter } from "@orchlet/core";
-import { evaluateMergeGates, type PRGateInput } from "./gates.js";
+import { evaluateMergeGates, normalizeRollupState, type PRGateInput } from "./gates.js";
 import { computeNextPollInterval } from "./backoff.js";
 
 const execFileAsync = promisify(execFile);
@@ -117,17 +117,8 @@ export class PRBabysitter implements IBabysitter {
         authorAssociation: r.authorAssociation || "NONE",
       }));
 
-      let statusRollupState = "SUCCESS";
       const rollups = data.statusCheckRollup || [];
-      for (const check of rollups) {
-        if (check.conclusion === "FAILURE" || check.status === "FAILED") {
-          statusRollupState = "FAILURE";
-          break;
-        }
-        if (check.status === "IN_PROGRESS" || check.status === "QUEUED") {
-          statusRollupState = "PENDING";
-        }
-      }
+      const statusRollupState = normalizeRollupState(rollups);
 
       return {
         state: data.state || "OPEN",

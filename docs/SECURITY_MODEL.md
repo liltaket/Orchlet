@@ -122,5 +122,34 @@ Because coding agents execute code and modify repositories, the security boundar
          "autoMerge": false
        }
      }
-     \`\`\`
-   - By default, \`autoMerge\` is \`false\`. When all merge gates (CI passing, AI reviewer approval, no merge conflicts) are satisfied, the task settles in the **\`READY_TO_MERGE\`** state with an attention state of **\`SETTLED\`**, leaving final merge execution to human control or repository policy.
+     ```
+   - By default, `autoMerge` is `false`. When all merge gates (CI passing, AI reviewer approval, no merge conflicts) are satisfied, the task settles in the **`READY_TO_MERGE`** state with an attention state of **`SETTLED`**, leaving final merge execution to human control or repository policy.
+
+2. **GitHub CheckRun & StatusContext Gate Normalization**:
+   - The PR babysitter normalizes all GitHub CheckRun statuses and StatusContext states.
+   - Conservative rule: Unknown check states default to `ERROR`, never `SUCCESS`.
+   - Any pending check or context (e.g. CodeRabbit, SonarQube, GitHub Actions) correctly yields rollup state `PENDING` and blocks merging.
+
+---
+
+## 7. Cost, Budget & Abuse Controls
+
+1. **Hard Per-Task Budget Enforcement**:
+   - Tasks can define `perTaskBudgetUsd` (or inherited from `budget.perTaskUsd`).
+   - Before dispatching any model call (executor, reviewer, repairer), Orchlet forecasts token usage and costs.
+   - If the projected cost exceeds the remaining task budget, the call is blocked immediately with `BUDGET_EXHAUSTED`.
+
+2. **Rolling Daily & Monthly Spend Caps**:
+   - Rolling daily and monthly spend is tracked persistently in `~/.orchlet/budget-spend.json`.
+   - Configurable caps (`budget.dailyUsd`, `budget.monthlyUsd`, `budget.hardStopAtPercent`) prevent runaway agent loops or denial-of-wallet scenarios.
+   - Real-time spend is visible via `GET /api/usage` and displayed in the control plane dashboard.
+
+3. **Context Truncation & Token Budget Bounds**:
+   - To prevent token exhaustion and excessive prompt costs from huge files or diffs, context files in reviewer packets are capped at 12,000 characters, and git diffs are capped at 60,000 characters with explicit truncation annotations.
+
+4. **Strict Repository Validation**:
+   - `POST /api/tasks` strictly executes `git rev-parse --is-inside-work-tree` at the target repository path.
+   - Requests with non-existent directories or arbitrary non-git filesystem locations are rejected with HTTP 400.
+
+5. **Transparent Routing Rationales**:
+   - Every model routing decision records its full rationale (`task.routingRationales`), including considered candidate models, cost class, forecast cost, remaining budget, and reasons for selection or rejection.

@@ -4,6 +4,107 @@ export interface GateEvaluation {
   actionRequired?: "UPDATE_BRANCH" | "WAIT_CI" | "WAIT_REVIEW" | "RESOLVE_CONFLICT" | "RESOLVE_THREADS";
 }
 
+export type NormalizedCheckState = "SUCCESS" | "PENDING" | "FAILURE" | "ERROR";
+
+export function normalizeCheckItem(check: any): NormalizedCheckState {
+  if (!check || typeof check !== "object") {
+    return "ERROR";
+  }
+
+  // 1. StatusContext: uses .state (EXPECTED, PENDING, SUCCESS, ERROR, FAILURE)
+  if (check.__typename === "StatusContext" || (check.state && !check.conclusion && !check.status)) {
+    const state = String(check.state || "").trim().toUpperCase();
+    switch (state) {
+      case "EXPECTED":
+      case "PENDING":
+        return "PENDING";
+      case "SUCCESS":
+        return "SUCCESS";
+      case "FAILURE":
+        return "FAILURE";
+      case "ERROR":
+        return "ERROR";
+      default:
+        // Conservative: unknown state is treated as ERROR, never SUCCESS
+        return "ERROR";
+    }
+  }
+
+  // 2. CheckRun: uses .status (QUEUED, IN_PROGRESS, COMPLETED, etc.) and .conclusion
+  const status = String(check.status || "").trim().toUpperCase();
+  const conclusion = check.conclusion ? String(check.conclusion).trim().toUpperCase() : null;
+
+  // Active or unstarted check run
+  if (status === "QUEUED" || status === "IN_PROGRESS" || status === "WAITING" || status === "REQUESTED" || status === "PENDING") {
+    return "PENDING";
+  }
+
+  // If conclusion is explicitly available (COMPLETED or conclusion set)
+  if (conclusion) {
+    switch (conclusion) {
+      case "SUCCESS":
+      case "NEUTRAL":
+      case "SKIPPED":
+        return "SUCCESS";
+      case "FAILURE":
+      case "CANCELLED":
+      case "TIMED_OUT":
+      case "ACTION_REQUIRED":
+      case "STALE":
+        return "FAILURE";
+      case "ERROR":
+        return "ERROR";
+      default:
+        // Unknown conclusion: conservative fail
+        return "ERROR";
+    }
+  }
+
+  // Completed but no conclusion yet
+  if (status === "COMPLETED") {
+    return "PENDING";
+  }
+
+  // Check generic .state fallback if status was empty
+  if (check.state) {
+    const fallbackState = String(check.state).trim().toUpperCase();
+    if (fallbackState === "SUCCESS") return "SUCCESS";
+    if (fallbackState === "PENDING" || fallbackState === "EXPECTED") return "PENDING";
+    if (fallbackState === "FAILURE") return "FAILURE";
+    if (fallbackState === "ERROR") return "ERROR";
+  }
+
+  // Unrecognized check format
+  return "ERROR";
+}
+
+export function normalizeRollupState(checks: any[]): NormalizedCheckState {
+  if (!Array.isArray(checks) || checks.length === 0) {
+    return "SUCCESS";
+  }
+
+  let hasFailure = false;
+  let hasError = false;
+  let hasPending = false;
+
+  for (const check of checks) {
+    const normalized = normalizeCheckItem(check);
+    if (normalized === "FAILURE") {
+      hasFailure = true;
+    } else if (normalized === "ERROR") {
+      hasError = true;
+    } else if (normalized === "PENDING") {
+      hasPending = true;
+    }
+  }
+
+  // Precedence: FAILURE > ERROR > PENDING > SUCCESS
+  if (hasFailure) return "FAILURE";
+  if (hasError) return "ERROR";
+  if (hasPending) return "PENDING";
+  return "SUCCESS";
+}
+
 export interface PRGateInput {
   state: "OPEN" | "CLOSED" | "MERGED" | string;
   isDraft: boolean;
@@ -11,7 +112,7 @@ export interface PRGateInput {
   mergeStateStatus: "CLEAN" | "BLOCKED" | "BEHIND" | "DIRTY" | "UNSTABLE" | "HAS_HOOKS" | string;
   reviews: Array<{ state: "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED" | string; authorAssociation: string }>;
   unresolvedThreadCount: number;
-  statusRollupState: "SUCCESS" | "PENDING" | "FAILURE" | "ERROR" | string;
+  statusRollupState: NormalizedCheckState | string;
 }
 
 export function evaluateMergeGates(pr: PRGateInput): GateEvaluation {

@@ -1,13 +1,17 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import Fastify, { type FastifyInstance } from "fastify";
 import fastifyWebsocket from "@fastify/websocket";
 import fastifyCors from "@fastify/cors";
 import { Logger } from "@orchlet/shared";
 import { WorkflowEngine } from "@orchlet/workflow-engine";
-import { usageManager } from "@orchlet/usage";
+import { usageManager, budgetTracker } from "@orchlet/usage";
 import { notificationManager } from "@orchlet/notifications";
 import { AuthManager } from "./auth.js";
+
+const execFileAsync = promisify(execFile);
 
 export async function createServer(engine = new WorkflowEngine()): Promise<FastifyInstance> {
   const app = Fastify({
@@ -115,9 +119,27 @@ export async function createServer(engine = new WorkflowEngine()): Promise<Fasti
     }
 
     try {
+      const { stdout } = await execFileAsync("git", ["rev-parse", "--is-inside-work-tree"], {
+        cwd: resolvedPath,
+      });
+      if (stdout.trim() !== "true") {
+        return reply.status(400).send({
+          error: `'repoPath' must be a valid git repository: ${body.repoPath}`,
+        });
+      }
+    } catch {
+      return reply.status(400).send({
+        error: `'repoPath' must be a valid git repository: ${body.repoPath}`,
+      });
+    }
+
+    try {
       const task = await engine.createTask(body.intent, body.repoPath, {
         routingMode: body.routingMode,
         executionMode: body.executionMode,
+        perTaskBudgetUsd: body.perTaskBudgetUsd,
+        budget: body.budget,
+        roleMappings: body.roleMappings,
       });
       // Start async in background
       engine.startTask(task.id).catch((err: any) => {
@@ -157,6 +179,7 @@ export async function createServer(engine = new WorkflowEngine()): Promise<Fasti
   app.get("/api/usage", async () => {
     return {
       snapshots: usageManager.getAllSnapshots(),
+      budgetSpend: budgetTracker.getSpendSummary(),
       timestamp: new Date().toISOString(),
     };
   });

@@ -94,6 +94,7 @@ Orchlet reads configuration from `orchlet.config.json` in your repository root, 
 ```json
 {
   "activeHarness": "opencode",
+  "routingMode": "AUTO",
   "verification": ["npm test"],
   "git": {
     "push": false,
@@ -101,20 +102,18 @@ Orchlet reads configuration from `orchlet.config.json` in your repository root, 
     "autoMerge": false,
     "baseBranch": "main"
   },
-  "models": {
-    "fast-coder": {
-      "provider": "openrouter",
-      "model": "deepseek/deepseek-chat",
-      "tier": "fast",
-      "costWeight": 0.2
-    },
-    "strong-critic": {
-      "provider": "openrouter",
-      "model": "anthropic/claude-3.7-sonnet",
-      "tier": "strong",
-      "costWeight": 3.0
-    }
-  }
+  "budget": {
+    "perTaskUsd": 0.5,
+    "dailyUsd": 5.0,
+    "monthlyUsd": 50.0,
+    "hardStopAtPercent": 100
+  },
+  "roleMappings": {
+    "executor": { "provider": "openrouter", "model": "z-ai/glm-5.3-flash" },
+    "critic": { "provider": "openrouter", "model": "google/gemini-3.8-flash" },
+    "repairer": { "provider": "openrouter", "model": "z-ai/glm-5.3-flash" }
+  },
+  "preferredModels": ["z-ai/glm-5.3-flash", "google/gemini-3.8-flash"]
 }
 ```
 

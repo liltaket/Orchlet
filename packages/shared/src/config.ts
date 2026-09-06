@@ -7,13 +7,42 @@ export interface ModelCatalogEntry {
   provider: string;
   model: string;
   tier: "fast" | "balanced" | "strong";
+  costClass?: "FREE" | "TINY" | "CHEAP" | "MODERATE" | "EXPENSIVE" | "PREMIUM" | "SUBSCRIPTION";
   strengths?: string[];
+  capabilities?: string[];
   costWeight?: number;
+  pricing?: {
+    promptPerToken: number;
+    completionPerToken: number;
+  };
+  contextLength?: number;
+  discoveredAt?: string;
+  discoverySource?: string;
+}
+
+export interface BudgetConfigData {
+  mode?: "balanced" | "strict" | "permissive";
+  perTaskUsd?: number;
+  dailyUsd?: number;
+  monthlyUsd?: number;
+  warnAtPercent?: number;
+  hardStopAtPercent?: number;
+  roleLimits?: {
+    executor?: number;
+    reviewer?: number;
+    repairer?: number;
+    reserve?: number;
+  };
 }
 
 export interface OrchletConfigData {
+  routingMode?: "AUTO" | "CHEAP" | "QUALITY" | "BEST" | "MANUAL";
+  budget?: BudgetConfigData;
   models?: Record<string, ModelCatalogEntry>;
   roleMappings?: Record<string, { tier?: "fast" | "balanced" | "strong"; model?: string; provider?: string }>;
+  preferredModels?: string[];
+  excludedModels?: string[];
+  maxCostClass?: "FREE" | "TINY" | "CHEAP" | "MODERATE" | "EXPENSIVE" | "PREMIUM" | "SUBSCRIPTION";
   git?: {
     push?: boolean;
     openPr?: boolean;
@@ -25,34 +54,54 @@ export interface OrchletConfigData {
 }
 
 const DEFAULT_CONFIG: OrchletConfigData = {
+  routingMode: "AUTO",
+  budget: {
+    mode: "balanced",
+    perTaskUsd: 0.50,
+    dailyUsd: 3.00,
+    monthlyUsd: 30.00,
+    warnAtPercent: 75,
+    hardStopAtPercent: 100,
+  },
   models: {
-    "deepseek-fast": {
+    "economy-coder": {
       provider: "openrouter",
-      model: "deepseek/deepseek-chat",
+      model: "z-ai/glm-5.3-flash",
       tier: "fast",
-      strengths: ["fast", "coding", "low-cost"],
-      costWeight: 0.2,
+      costClass: "TINY",
+      strengths: ["fast", "coding", "repair"],
+      costWeight: 0.1,
+      pricing: {
+        promptPerToken: 0.000000075,
+        completionPerToken: 0.00000025,
+      },
+      contextLength: 1310720,
     },
-    "gemini-flash": {
+    "balanced-critic": {
       provider: "openrouter",
-      model: "google/gemini-2.5-flash",
-      tier: "fast",
-      strengths: ["fast", "context"],
-      costWeight: 0.3,
+      model: "google/gemini-3.8-flash",
+      tier: "balanced",
+      costClass: "MODERATE",
+      strengths: ["coding", "reasoning", "adversarial-review"],
+      costWeight: 0.5,
+      pricing: {
+        promptPerToken: 0.00000075,
+        completionPerToken: 0.00000375,
+      },
+      contextLength: 1048576,
     },
     "deepseek-balanced": {
       provider: "openrouter",
       model: "deepseek/deepseek-chat",
       tier: "balanced",
+      costClass: "CHEAP",
       strengths: ["coding", "architecture", "repair"],
-      costWeight: 0.5,
-    },
-    "gemini-pro": {
-      provider: "openrouter",
-      model: "google/gemini-2.5-pro",
-      tier: "strong",
-      strengths: ["reasoning", "adversarial-review", "complex-refactor"],
-      costWeight: 2.0,
+      costWeight: 0.3,
+      pricing: {
+        promptPerToken: 0.00000014,
+        completionPerToken: 0.00000028,
+      },
+      contextLength: 65536,
     },
   },
   git: {
@@ -98,7 +147,9 @@ export class ConfigManager {
     return {
       ...base,
       ...user,
+      budget: user.budget ? { ...base.budget, ...user.budget } : base.budget,
       models: { ...base.models, ...user.models },
+      roleMappings: user.roleMappings ? { ...base.roleMappings, ...user.roleMappings } : base.roleMappings,
       git: { ...base.git, ...user.git },
       verification: user.verification && user.verification.length > 0 ? user.verification : base.verification,
       activeHarness: user.activeHarness || base.activeHarness,

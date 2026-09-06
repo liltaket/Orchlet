@@ -12,6 +12,7 @@ import {
 } from "@orchlet/shared";
 import type {
   AttentionState,
+  BudgetConfig,
   ExecutionMode,
   IContextBuilder,
   IAgentExecutor,
@@ -22,10 +23,13 @@ import type {
   ReviewFinding,
   ReviewVerdict,
   RoutingMode,
+  RoutingRationale,
   Task,
+  TaskSpendSummary,
   TaskStatus,
   VerificationResult,
 } from "@orchlet/core";
+import { budgetTracker } from "@orchlet/usage";
 import { modelRouter, ModelRouter } from "@orchlet/routing";
 import { contextPacketBuilder, worktreeManager, WorktreeManager } from "@orchlet/context";
 import { prBabysitter, PRBabysitter, getGitHubRepoIdentity } from "@orchlet/github";
@@ -108,9 +112,18 @@ export class WorkflowEngine implements IWorkflowEngine {
   async createTask(
     intent: string,
     repoPath: string,
-    options: { routingMode?: RoutingMode; executionMode?: ExecutionMode } = {},
+    options: {
+      routingMode?: RoutingMode;
+      executionMode?: ExecutionMode;
+      perTaskBudgetUsd?: number;
+      budget?: BudgetConfig;
+      roleMappings?: Record<string, any>;
+    } = {},
   ): Promise<Task> {
     const id = generateId();
+    const budget =
+      options.budget ||
+      (options.perTaskBudgetUsd ? { perTaskUsd: options.perTaskBudgetUsd } : undefined);
     const task: Task = {
       id,
       intent,
@@ -121,8 +134,21 @@ export class WorkflowEngine implements IWorkflowEngine {
       repoPath: path.resolve(repoPath),
       baseBranch: "main",
       workBranch: `orchlet/task-${id}`,
+      budget,
+      perTaskBudgetUsd: options.perTaskBudgetUsd ?? budget?.perTaskUsd,
+      roleMappings: options.roleMappings,
       modelUsageAudit: [],
       verificationResults: [],
+      routingRationales: [],
+      spend: {
+        totalCostUsd: 0,
+        executorCostUsd: 0,
+        reviewerCostUsd: 0,
+        repairCostUsd: 0,
+        callCount: 0,
+        totalTokens: 0,
+        costConfidence: "EXACT",
+      },
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -167,8 +193,26 @@ export class WorkflowEngine implements IWorkflowEngine {
     const task = await this.getTaskOrThrow(taskId);
     this.logger.info(`Starting execution for task ${taskId}: "${task.intent}"`);
 
-    // Load runtime configuration
-    const config = this.userConfig || (await ConfigManager.loadConfig(task.repoPath));
+    // Merge runtime configuration with task-level overrides
+    const baseConfig = this.userConfig || (await ConfigManager.loadConfig(task.repoPath));
+    const config: OrchletConfigData = {
+      ...baseConfig,
+      routingMode: task.routingMode || baseConfig.routingMode,
+      budget: task.budget || baseConfig.budget,
+      roleMappings: task.roleMappings
+        ? { ...baseConfig.roleMappings, ...task.roleMappings }
+        : baseConfig.roleMappings,
+    };
+
+    // Check rolling daily/monthly budget limits
+    const budgetCheck = budgetTracker.checkBudgetLimits(config.budget);
+    if (!budgetCheck.allowed) {
+      throw new OrchletError(
+        `Execution blocked by budget policy: ${budgetCheck.reason}`,
+        "BUDGET_EXHAUSTED",
+      );
+    }
+
     task.modelUsageAudit = task.modelUsageAudit || [];
     const activeHarness = config.activeHarness || "opencode";
     const executionMode = task.executionMode || (process.env.VITEST && !process.env.TEST_LIVE ? "MOCK" : "REAL");
@@ -200,8 +244,35 @@ export class WorkflowEngine implements IWorkflowEngine {
 
       // 4. IMPLEMENTATION & MUTATION VIA AGENT EXECUTOR
       await this.transition(task, "IMPLEMENTING", "RUNNING");
-      const execDecision = await this.router.resolveModel("executor", task.routingMode, config);
-      this.logger.info(`Implementation routed to: ${execDecision.providerId}/${execDecision.modelId}`);
+      const remainingForExec =
+        task.perTaskBudgetUsd != null
+          ? Math.max(0, task.perTaskBudgetUsd - (task.spend?.totalCostUsd || 0))
+          : undefined;
+
+      const execDecision = await this.router.resolveModel("executor", task.routingMode, config, {
+        taskRemainingBudgetUsd: remainingForExec,
+        preferredModels: config.preferredModels,
+        excludedModels: config.excludedModels,
+        maxCostClass: config.maxCostClass,
+      });
+      this.logger.info(
+        `Implementation routed to: ${execDecision.providerId}/${execDecision.modelId} (est: $${execDecision.estimatedCostUsd ?? 0})`,
+      );
+
+      task.routingRationales = task.routingRationales || [];
+      task.routingRationales.push({
+        role: "executor",
+        selectedModel: execDecision.modelId,
+        selectedProvider: execDecision.providerId,
+        tier: execDecision.tier,
+        costClass: execDecision.costClass,
+        candidates: execDecision.candidatesConsidered,
+        estimatedCostUsd: execDecision.estimatedCostUsd,
+        remainingTaskBudgetUsd: remainingForExec,
+        reasons: execDecision.reasons,
+        subscriptionQuotaState: execDecision.subscriptionQuotaState,
+        timestamp: new Date().toISOString(),
+      });
 
       implementerPacket.planSummary = task.plan.summary;
       const execResult = await executor.execute({
@@ -249,8 +320,33 @@ export class WorkflowEngine implements IWorkflowEngine {
 
       // 6. INDEPENDENT ADVERSARIAL REVIEW & REMEDIATION LOOP
       await this.transition(task, "REVIEWING", "RUNNING");
-      const criticDecision = await this.router.resolveModel("critic", task.routingMode, config);
-      this.logger.info(`Review engine routed to: ${criticDecision.providerId}/${criticDecision.modelId}`);
+      const remainingForCritic =
+        task.perTaskBudgetUsd != null
+          ? Math.max(0, task.perTaskBudgetUsd - (task.spend?.totalCostUsd || 0))
+          : undefined;
+      const criticDecision = await this.router.resolveModel("critic", task.routingMode, config, {
+        taskRemainingBudgetUsd: remainingForCritic,
+        preferredModels: config.preferredModels,
+        excludedModels: config.excludedModels,
+        maxCostClass: config.maxCostClass,
+      });
+      this.logger.info(
+        `Review engine routed to: ${criticDecision.providerId}/${criticDecision.modelId} (est: $${criticDecision.estimatedCostUsd ?? 0})`,
+      );
+      task.routingRationales = task.routingRationales || [];
+      task.routingRationales.push({
+        role: "critic",
+        selectedModel: criticDecision.modelId,
+        selectedProvider: criticDecision.providerId,
+        tier: criticDecision.tier,
+        costClass: criticDecision.costClass,
+        candidates: criticDecision.candidatesConsidered,
+        estimatedCostUsd: criticDecision.estimatedCostUsd,
+        remainingTaskBudgetUsd: remainingForCritic,
+        reasons: criticDecision.reasons,
+        subscriptionQuotaState: criticDecision.subscriptionQuotaState,
+        timestamp: new Date().toISOString(),
+      });
 
       let diff = await this.worktree.getDiff(worktreePath, task.baseBranch);
 
@@ -327,10 +423,34 @@ export class WorkflowEngine implements IWorkflowEngine {
           `Review/verification flagged ${blockers.length} issue(s). Initiating repair cycle ${repairAttempt}/${maxRepairAttempts}...`
         );
 
-        const repairDecision = await this.router.resolveModel("repairer", task.routingMode, config);
+        const remainingForRepair =
+          task.perTaskBudgetUsd != null
+            ? Math.max(0, task.perTaskBudgetUsd - (task.spend?.totalCostUsd || 0))
+            : undefined;
+
+        const repairDecision = await this.router.resolveModel("repairer", task.routingMode, config, {
+          taskRemainingBudgetUsd: remainingForRepair,
+          preferredModels: config.preferredModels,
+          excludedModels: config.excludedModels,
+          maxCostClass: config.maxCostClass,
+        });
         this.logger.info(
-          `Repair cycle ${repairAttempt} routed to: ${repairDecision.providerId}/${repairDecision.modelId}`
+          `Repair cycle ${repairAttempt} routed to: ${repairDecision.providerId}/${repairDecision.modelId} (est: $${repairDecision.estimatedCostUsd ?? 0})`
         );
+        task.routingRationales = task.routingRationales || [];
+        task.routingRationales.push({
+          role: "repairer",
+          selectedModel: repairDecision.modelId,
+          selectedProvider: repairDecision.providerId,
+          tier: repairDecision.tier,
+          costClass: repairDecision.costClass,
+          candidates: repairDecision.candidatesConsidered,
+          estimatedCostUsd: repairDecision.estimatedCostUsd,
+          remainingTaskBudgetUsd: remainingForRepair,
+          reasons: repairDecision.reasons,
+          subscriptionQuotaState: repairDecision.subscriptionQuotaState,
+          timestamp: new Date().toISOString(),
+        });
 
         const repairPacket = await this.contextBuilder.buildPacket(
           task.id,
@@ -386,23 +506,48 @@ export class WorkflowEngine implements IWorkflowEngine {
           task.repoPath,
           "reviewer",
         );
+
+        const remainingForFreshReview =
+          task.perTaskBudgetUsd != null
+            ? Math.max(0, task.perTaskBudgetUsd - (task.spend?.totalCostUsd || 0))
+            : undefined;
+        const freshCriticDecision = await this.router.resolveModel("critic", task.routingMode, config, {
+          taskRemainingBudgetUsd: remainingForFreshReview,
+          preferredModels: config.preferredModels,
+          excludedModels: config.excludedModels,
+          maxCostClass: config.maxCostClass,
+        });
+        task.routingRationales.push({
+          role: "critic",
+          selectedModel: freshCriticDecision.modelId,
+          selectedProvider: freshCriticDecision.providerId,
+          tier: freshCriticDecision.tier,
+          costClass: freshCriticDecision.costClass,
+          candidates: freshCriticDecision.candidatesConsidered,
+          estimatedCostUsd: freshCriticDecision.estimatedCostUsd,
+          remainingTaskBudgetUsd: remainingForFreshReview,
+          reasons: freshCriticDecision.reasons,
+          subscriptionQuotaState: freshCriticDecision.subscriptionQuotaState,
+          timestamp: new Date().toISOString(),
+        });
+
         review = await this.reviewer.reviewDiff(
           diff,
           task.intent,
           verificationResults,
           reviewerPacket,
           {
-            model: criticDecision.modelId,
-            provider: criticDecision.providerId,
+            model: freshCriticDecision.modelId,
+            provider: freshCriticDecision.providerId,
             executionMode,
             allowStaticFallback,
           },
         );
         task.latestReview = review;
         this.recordAudit(task, "critic", {
-          requestedProvider: criticDecision.providerId,
-          requestedModel: criticDecision.modelId,
-          actualProvider: review.actualProvider || review.providerUsed || criticDecision.providerId,
+          requestedProvider: freshCriticDecision.providerId,
+          requestedModel: freshCriticDecision.modelId,
+          actualProvider: review.actualProvider || review.providerUsed || freshCriticDecision.providerId,
           actualModel: review.actualModel || review.reviewerModel,
           fallbackReason: review.fallbackReason,
           durationMs: 120,
@@ -469,12 +614,16 @@ export class WorkflowEngine implements IWorkflowEngine {
         task.prUrl = pr.prUrl;
 
         await this.transition(task, "PR_BABYSITTING", "WAITING_ON_AGENTS");
+        const maxPollAttempts = (gitPolicy as any)?.maxPollAttempts || 30;
+        const pollDelayOverrideMs = (gitPolicy as any)?.pollDelayOverrideMs;
         const babysitResult = await this.babysitter.babysitPR(
           repoIdentity.owner,
           repoIdentity.repo,
           task.prNumber,
           {
             autoMerge: gitPolicy.autoMerge,
+            maxPollAttempts,
+            pollDelayOverrideMs,
           },
         );
 
@@ -606,6 +755,34 @@ export class WorkflowEngine implements IWorkflowEngine {
 
     task.modelUsageAudit = task.modelUsageAudit || [];
     task.modelUsageAudit.push(record);
+
+    const currentSpend: TaskSpendSummary = task.spend || {
+      totalCostUsd: 0,
+      executorCostUsd: 0,
+      reviewerCostUsd: 0,
+      repairCostUsd: 0,
+      callCount: 0,
+      totalTokens: 0,
+      costConfidence: "ESTIMATED",
+    };
+    const cost = auditData.costUsd || 0;
+    const tokens = auditData.tokens || 0;
+    currentSpend.totalCostUsd = Number((currentSpend.totalCostUsd + cost).toFixed(6));
+    currentSpend.totalTokens += tokens;
+    currentSpend.callCount += 1;
+    if (role === "executor") {
+      currentSpend.executorCostUsd = Number((currentSpend.executorCostUsd + cost).toFixed(6));
+    } else if (role === "critic") {
+      currentSpend.reviewerCostUsd = Number((currentSpend.reviewerCostUsd + cost).toFixed(6));
+    } else if (role === "repairer") {
+      currentSpend.repairCostUsd = Number((currentSpend.repairCostUsd + cost).toFixed(6));
+    }
+    task.spend = currentSpend;
+
+    if (cost > 0) {
+      budgetTracker.recordSpend(cost);
+    }
+
     this.logger.info(
       `Audit recorded [${role}]: requested=${record.requestedProvider}/${record.requestedModel} -> actual=${record.actualProvider}/${record.actualModel} (${auditData.durationMs}ms, tokens=${auditData.tokens ?? "N/A"}, cost=$${auditData.costUsd ?? 0})`
     );
