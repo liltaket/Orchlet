@@ -6,6 +6,7 @@ import type {
   ReviewVerdict,
   VerificationResult,
   TaskPacket,
+  ExecutionMode,
 } from "@orchlet/core";
 import { OpenRouterProvider, openRouterProvider } from "./openrouter.js";
 
@@ -18,6 +19,7 @@ export interface AIReviewerOptions {
 export interface ReviewExecutionOptions {
   model?: string;
   provider?: string;
+  executionMode?: ExecutionMode;
 }
 
 export class IndependentReviewer implements IReviewEngine {
