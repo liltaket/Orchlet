@@ -3,14 +3,16 @@ export type TaskStatus =
   | "PLANNING"
   | "PLAN_APPROVED"
   | "IMPLEMENTING"
-  | "TESTING"
+  | "VERIFYING"
   | "REVIEWING"
-  | "PR_OPENED"
+  | "REPAIRING"
+  | "COMMITTED"
   | "PR_BABYSITTING"
   | "READY_TO_MERGE"
+  | "SETTLED"
   | "COMPLETED"
   | "FAILED"
-  | "PAUSED";
+  | "CANCELLED";
 
 export type AttentionState =
   | "RUNNING"
@@ -18,25 +20,28 @@ export type AttentionState =
   | "NEEDS_ATTENTION"
   | "SETTLED";
 
-export type RoutingMode = "AUTO" | "CHEAP" | "QUALITY" | "BEST" | "MANUAL";
+export type RoutingMode = "AUTO" | "CHEAP" | "QUALITY" | "BEST";
+
+export type AgentRole =
+  | "planner"
+  | "architect"
+  | "executor"
+  | "critic"
+  | "repairer"
+  | "babysitter";
 
 export type ModelTier = "fast" | "balanced" | "strong";
 
-export type AgentRole = "planner" | "architect" | "executor" | "critic" | "repairer";
-
 export interface PlanStep {
   id: string;
-  order: number;
-  title: string;
   description: string;
   targetFiles?: string[];
-  status: "PENDING" | "RUNNING" | "COMPLETED" | "FAILED";
+  status: "PENDING" | "IN_PROGRESS" | "COMPLETED" | "FAILED";
   resultSummary?: string;
 }
 
 export interface Plan {
   id: string;
-  taskId: string;
   title: string;
   summary: string;
   steps: PlanStep[];
@@ -65,6 +70,9 @@ export interface ReviewVerdict {
   summary: string;
   reviewedCommit: string;
   reviewerModel: string;
+  providerUsed?: string;
+  tokensUsed?: { prompt: number; completion: number; total: number };
+  costEstimate?: number;
   timestamp: string;
 }
 
@@ -164,7 +172,7 @@ export interface ModelConfigEntry {
 
 export interface OrchletConfig {
   models?: Record<string, ModelConfigEntry>;
-  roleMappings?: Partial<Record<AgentRole, { tier?: ModelTier; model?: string; provider?: string }>>;
+  roleMappings?: Record<string, { tier?: ModelTier; model?: string; provider?: string }>;
   git?: GitConfig;
   verification?: string[];
   activeHarness?: "opencode" | "openrouter" | "mock";
@@ -210,4 +218,37 @@ export interface Checkpoint {
   gitRef: string;
   snapshotData: Record<string, unknown>;
   createdAt: string;
+}
+
+export interface RoutingDecision {
+  providerId: string;
+  modelId: string;
+  tier: ModelTier;
+  estimatedCostWeight: number;
+  reason: string;
+  fallbackHops: number;
+  candidatesConsidered: string[];
+}
+
+export interface ChatMessage {
+  role: "system" | "user" | "assistant";
+  content: string;
+}
+
+export interface ChatCompletionOptions {
+  model: string;
+  messages: ChatMessage[];
+  temperature?: number;
+  maxTokens?: number;
+}
+
+export interface ChatCompletionResult {
+  text: string;
+  model: string;
+  tokensUsed?: {
+    prompt: number;
+    completion: number;
+    total: number;
+  };
+  costUsd?: number;
 }

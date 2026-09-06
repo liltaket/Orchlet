@@ -7,12 +7,15 @@
   "scripts": {
     "build": "pnpm -r run build",
     "test": "vitest run",
+    "test:live": "cross-env TEST_LIVE=true vitest run packages/workflow-engine/test/opencode-live.test.ts",
+    "orchlet:smoke": "cross-env TEST_LIVE=true vitest run packages/workflow-engine/test/opencode-live.test.ts",
     "lint": "pnpm -r run lint",
     "dev:server": "pnpm --filter @orchlet/server run dev",
     "dev:dashboard": "pnpm --filter @orchlet/dashboard run dev"
   },
   "devDependencies": {
     "@types/node": "^22.13.5",
+    "cross-env": "^7.0.3",
     "typescript": "^5.7.3",
     "vitest": "^3.0.7"
   },

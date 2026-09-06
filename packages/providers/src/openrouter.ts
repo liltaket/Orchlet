@@ -20,6 +20,7 @@ export interface ChatCompletionResult {
     completion: number;
     total: number;
   };
+  costUsd?: number;
 }
 
 export class OpenRouterProvider {
@@ -73,6 +74,18 @@ export class OpenRouterProvider {
     const choice = data.choices?.[0];
     const text = choice?.message?.content || "";
 
+    let costUsd: number | undefined;
+    if (typeof data.usage?.cost === "number") {
+      costUsd = data.usage.cost;
+    } else if (typeof data.usage?.total_cost === "number") {
+      costUsd = data.usage.total_cost;
+    } else {
+      const headerCost = response.headers.get("x-openrouter-cost");
+      if (headerCost) {
+        costUsd = parseFloat(headerCost);
+      }
+    }
+
     return {
       text,
       model: data.model || options.model,
@@ -83,6 +96,7 @@ export class OpenRouterProvider {
             total: data.usage.total_tokens,
           }
         : undefined,
+      costUsd,
     };
   }
 }

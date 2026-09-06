@@ -1,11 +1,23 @@
 import { Logger } from "@orchlet/shared";
-import type { IReviewEngine, ReviewFinding, ReviewVerdict, VerificationResult, TaskPacket } from "@orchlet/core";
+import type {
+  ContextFile,
+  IReviewEngine,
+  ReviewFinding,
+  ReviewVerdict,
+  VerificationResult,
+  TaskPacket,
+} from "@orchlet/core";
 import { OpenRouterProvider, openRouterProvider } from "./openrouter.js";
 
 export interface AIReviewerOptions {
   model?: string;
   provider?: OpenRouterProvider;
   forceAI?: boolean;
+}
+
+export interface ReviewExecutionOptions {
+  model?: string;
+  provider?: string;
 }
 
 export class IndependentReviewer implements IReviewEngine {
@@ -25,9 +37,12 @@ export class IndependentReviewer implements IReviewEngine {
     contextPrompt = "",
     verificationResults: VerificationResult[] = [],
     packet?: TaskPacket,
+    options?: ReviewExecutionOptions,
   ): Promise<ReviewVerdict> {
-    const startTime = Date.now();
     this.logger.info(`Starting independent adversarial review on diff (${diff.length} bytes)...`);
+
+    const modelToUse = options?.model || this.defaultModel;
+    const providerToUse = options?.provider || "openrouter";
 
     // If diff is completely empty and no files changed
     if (!diff || diff.trim().length === 0) {
@@ -44,7 +59,10 @@ export class IndependentReviewer implements IReviewEngine {
         ],
         summary: "Execution produced an empty diff. Real modifications are required.",
         reviewedCommit: "HEAD",
-        reviewerModel: this.defaultModel,
+        reviewerModel: modelToUse,
+        providerUsed: providerToUse,
+        tokensUsed: { prompt: 0, completion: 0, total: 0 },
+        costEstimate: 0,
         timestamp: new Date().toISOString(),
       };
     }
@@ -55,14 +73,14 @@ export class IndependentReviewer implements IReviewEngine {
 
     if (canUseAI) {
       try {
-        return await this.performAIReview(diff, contextPrompt, verificationResults, packet);
+        return await this.performAIReview(diff, contextPrompt, verificationResults, packet, modelToUse, providerToUse);
       } catch (err: any) {
         this.logger.warn(`AI review call failed (${err.message}). Falling back to static safety review.`);
       }
     }
 
     // Static fallback review for offline / test environments
-    return this.performStaticSafetyReview(diff, verificationResults);
+    return this.performStaticSafetyReview(diff, verificationResults, modelToUse, providerToUse);
   }
 
   private async performAIReview(
@@ -70,6 +88,8 @@ export class IndependentReviewer implements IReviewEngine {
     contextPrompt: string,
     verificationResults: VerificationResult[],
     packet?: TaskPacket,
+    modelToUse?: string,
+    providerToUse?: string,
   ): Promise<ReviewVerdict> {
     const testSummary = verificationResults.length > 0
       ? verificationResults
@@ -80,7 +100,7 @@ export class IndependentReviewer implements IReviewEngine {
     let instructions = "";
     if (packet?.contextBundle?.files) {
       instructions = packet.contextBundle.files
-        .map((f) => `### From ${f.relativePath}:\n${f.content}`)
+        .map((f: ContextFile) => `### From ${f.relativePath}:\n${f.content}`)
         .join("\n\n");
     }
 
@@ -129,7 +149,7 @@ ${diff}
 \`\`\``;
 
     const response = await this.provider.complete({
-      model: this.defaultModel,
+      model: modelToUse || this.defaultModel,
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userMessage },
@@ -166,11 +186,19 @@ ${diff}
       summary: parsed.summary || "Independent review completed.",
       reviewedCommit: "HEAD",
       reviewerModel: response.model,
+      providerUsed: providerToUse || "openrouter",
+      tokensUsed: response.tokensUsed,
+      costEstimate: response.costUsd,
       timestamp: new Date().toISOString(),
     };
   }
 
-  private performStaticSafetyReview(diff: string, verificationResults: VerificationResult[]): ReviewVerdict {
+  private performStaticSafetyReview(
+    diff: string,
+    verificationResults: VerificationResult[],
+    modelUsed = "offline-safety-reviewer",
+    providerUsed = "local",
+  ): ReviewVerdict {
     const findings: ReviewFinding[] = [];
 
     // Check for test failures
@@ -190,35 +218,26 @@ ${diff}
       findings.push({
         id: `rev_${Date.now()}_secret`,
         severity: "P0",
-        title: "Potential Secret Exposure",
-        filePath: "unknown",
-        description: "Hardcoded API key or access token detected in diff.",
+        title: "Hardcoded Credential Detected",
+        filePath: "diff",
+        description: "Git diff contains potential hardcoded API secret or credential token.",
         securityImpact: true,
       });
     }
 
-    // Check for lingering TODOs
-    if (diff.includes("TODO:") || diff.includes("FIXME:")) {
-      findings.push({
-        id: `rev_${Date.now()}_todo`,
-        severity: "P2",
-        title: "Unresolved TODO",
-        filePath: "unknown",
-        description: "Diff contains unresolved TODO comments.",
-      });
-    }
-
     const hasBlockers = findings.some((f) => f.severity === "P0" || f.severity === "P1");
-    const verdict = hasBlockers ? "CHANGES_REQUESTED" : "APPROVED";
-
-    this.logger.info(`Static safety review completed. Verdict: ${verdict}, Findings: ${findings.length}`);
 
     return {
-      verdict,
+      verdict: hasBlockers ? "CHANGES_REQUESTED" : "APPROVED",
       findings,
-      summary: hasBlockers ? "Independent review detected blocking issues." : "Code passed safety review.",
+      summary: hasBlockers
+        ? `Review flagged ${findings.length} blocking issues requiring resolution.`
+        : "Safety scan passed. Zero high-severity defects detected.",
       reviewedCommit: "HEAD",
-      reviewerModel: "static-safety-auditor",
+      reviewerModel: modelUsed,
+      providerUsed,
+      tokensUsed: { prompt: 0, completion: 0, total: 0 },
+      costEstimate: 0,
       timestamp: new Date().toISOString(),
     };
   }

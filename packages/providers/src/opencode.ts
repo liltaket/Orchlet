@@ -1,7 +1,6 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import * as path from "node:path";
-import { Logger, OrchletError } from "@orchlet/shared";
+import { Logger } from "@orchlet/shared";
 import type { AgentRequest, AgentResult, IAgentExecutor } from "@orchlet/core";
 
 const execFileAsync = promisify(execFile);
@@ -62,11 +61,14 @@ export class OpenCodeHarness implements IAgentExecutor {
     ];
 
     try {
-      // Execute opencode run
-      const { stdout, stderr } = await execFileAsync("opencode", args, {
+      const isWin = process.platform === "win32";
+      const binName = isWin ? "opencode.cmd" : "opencode";
+
+      const { stdout, stderr } = await execFileAsync(binName, args, {
         cwd: request.worktreePath,
         timeout: 180000, // 3 minutes timeout
         maxBuffer: 10 * 1024 * 1024,
+        shell: isWin,
       });
 
       const durationMs = Date.now() - startTime;

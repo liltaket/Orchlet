@@ -45,7 +45,7 @@ export class ContextPacketBuilder implements IContextBuilder {
       objective,
       contextBundle,
       planSummary: audience === "implementer" ? options.planSummary : undefined,
-      blockingFindings: options.blockingFindings,
+      blockingFindings: audience === "implementer" ? options.blockingFindings : undefined,
     };
   }
 }

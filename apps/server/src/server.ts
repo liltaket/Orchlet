@@ -32,8 +32,8 @@ export async function createServer(engine = new WorkflowEngine()): Promise<Fasti
 
   // Authentication hook for protected routes
   app.addHook("onRequest", async (req, reply) => {
-    // Health check is public
-    if (req.url === "/.well-known/orchlet/health") {
+    // Health checks are public
+    if (req.url === "/.well-known/orchlet/health" || req.url === "/health") {
       return;
     }
 
@@ -58,15 +58,15 @@ export async function createServer(engine = new WorkflowEngine()): Promise<Fasti
     return reply.status(401).send({ error: "Unauthorized: valid Orchlet Bearer token required" });
   });
 
-  // Health check
-  app.get("/.well-known/orchlet/health", async () => {
-    return {
-      status: "ok",
-      name: "Orchlet Control Plane Daemon",
-      version: "0.1.0",
-      timestamp: new Date().toISOString(),
-    };
+  // Health checks
+  const healthHandler = async () => ({
+    status: "ok",
+    name: "Orchlet Control Plane Daemon",
+    version: "0.1.0",
+    timestamp: new Date().toISOString(),
   });
+  app.get("/.well-known/orchlet/health", healthHandler);
+  app.get("/health", healthHandler);
 
   // Task APIs
   app.post("/api/tasks", async (req, reply) => {
@@ -74,20 +74,22 @@ export async function createServer(engine = new WorkflowEngine()): Promise<Fasti
     if (!body.intent || !body.repoPath) {
       return reply.status(400).send({ error: "Missing required 'intent' or 'repoPath'" });
     }
-    const task = await engine.createTask(body.intent, body.repoPath, {
-      routingMode: body.routingMode,
-    });
-    return reply.status(201).send(task);
+
+    try {
+      const task = await engine.createTask(body.intent, body.repoPath, body.config);
+      // Start async in background
+      engine.startTask(task.id).catch((err: any) => {
+        sysLogger.error(`Task ${task.id} failed asynchronously:`, err);
+      });
+
+      return reply.status(202).send(task);
+    } catch (err: any) {
+      return reply.status(500).send({ error: err.message });
+    }
   });
 
-  app.post("/api/tasks/:id/start", async (req, reply) => {
-    const { id } = req.params as { id: string };
-    // Run in background and return immediate ACK
-    engine.startTask(id).catch((err) => {
-      sysLogger.error(`Task ${id} execution error:`, err);
-    });
-    const task = await engine.getTask(id);
-    return reply.status(202).send(task);
+  app.get("/api/tasks", async () => {
+    return engine.listTasks();
   });
 
   app.get("/api/tasks/:id", async (req, reply) => {
@@ -99,51 +101,56 @@ export async function createServer(engine = new WorkflowEngine()): Promise<Fasti
     return task;
   });
 
-  app.get("/api/tasks", async () => {
-    return engine.listTasks();
-  });
-
-  app.post("/api/tasks/:id/pause", async (req, reply) => {
-    const { id } = req.params as { id: string };
-    const task = await engine.pauseTask(id);
-    return task;
-  });
-
   app.post("/api/tasks/:id/resume", async (req, reply) => {
     const { id } = req.params as { id: string };
-    const task = await engine.resumeTask(id);
-    return task;
+    try {
+      const resumed = await engine.resumeTask(id);
+      return reply.send(resumed);
+    } catch (err: any) {
+      return reply.status(400).send({ error: err.message });
+    }
   });
 
-  // Usage & Quota snapshots
+  // Quota and Usage API
   app.get("/api/usage", async () => {
     return {
-      providers: usageManager.getAllSnapshots(),
+      snapshots: usageManager.getAllSnapshots(),
+      timestamp: new Date().toISOString(),
     };
   });
 
-  // Real-time WebSocket streaming for UI / CLI
-  app.register(async function (fastify) {
-    fastify.get("/api/stream", { websocket: true }, (socket, req) => {
-      sysLogger.debug("WebSocket client connected to /api/stream");
+  // Real-time Event Stream (WebSocket)
+  app.get("/api/stream", { websocket: true }, (socket, req) => {
+    sysLogger.info("Client connected to real-time notification stream.");
 
-      const unsubscribeNotifications = notificationManager.subscribe((event) => {
-        if (socket.readyState === 1) {
-          socket.send(JSON.stringify({ type: "notification", payload: event }));
-        }
-      });
+    // Initial snapshot of tasks
+    try {
+      const tasks = engine.listTasks();
+      socket.send(JSON.stringify({ type: "SNAPSHOT", data: tasks }));
+    } catch (err: any) {
+      sysLogger.error("Failed to send initial snapshot:", err);
+    }
 
-      const unsubscribeUsage = usageManager.subscribe((snapshot) => {
-        if (socket.readyState === 1) {
-          socket.send(JSON.stringify({ type: "usage", payload: snapshot }));
-        }
-      });
+    const unsubscribe = notificationManager.subscribe((event: any) => {
+      try {
+        socket.send(JSON.stringify({ type: "NOTIFICATION", data: event }));
+      } catch (err) {
+        // Socket closed
+      }
+    });
 
-      socket.on("close", () => {
-        sysLogger.debug("WebSocket client disconnected");
-        unsubscribeNotifications();
-        unsubscribeUsage();
-      });
+    const unsubscribeEngine = engine.subscribe((snapshot: any) => {
+      try {
+        socket.send(JSON.stringify({ type: "TASK_UPDATE", data: snapshot }));
+      } catch (err) {
+        // Socket closed
+      }
+    });
+
+    socket.on("close", () => {
+      sysLogger.info("Client disconnected from notification stream.");
+      unsubscribe();
+      unsubscribeEngine();
     });
   });
 

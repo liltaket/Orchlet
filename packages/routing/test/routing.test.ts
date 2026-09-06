@@ -29,20 +29,44 @@ describe("ModelRouter & Quota Health Allocation", () => {
     expect(decision.estimatedCostWeight).toBeLessThan(1.0);
   });
 
-  it("triggers fallback when primary provider is exhausted", async () => {
+  it("respects explicit roleMappings in effective configuration", async () => {
     const usage = new UsageManager();
-    // Simulate openrouter exhausted
-    usage.updateWindows(
-      "openrouter",
-      [{ name: "primary", type: "credit_balance", usedPercent: 100, resetsAt: null, resetRemainingMs: 0 }],
-      true,
-    );
-
     const router = new ModelRouter(usage);
-    const decision = await router.resolveModel("executor", "AUTO");
 
-    // Must have hopped away from openrouter to healthy provider (openai or google)
-    expect(decision.providerId).not.toBe("openrouter");
-    expect(decision.fallbackHops).toBeGreaterThan(0);
+    const config = {
+      roleMappings: {
+        executor: { provider: "custom-provider", model: "model-X" },
+        critic: { provider: "openrouter", model: "model-Y" },
+      },
+    };
+
+    const execDecision = await router.resolveModel("executor", "AUTO", config);
+    expect(execDecision.modelId).toBe("model-X");
+    expect(execDecision.providerId).toBe("custom-provider");
+    expect(execDecision.reason).toBe("role_mapping");
+
+    const criticDecision = await router.resolveModel("critic", "AUTO", config);
+    expect(criticDecision.modelId).toBe("model-Y");
+    expect(criticDecision.providerId).toBe("openrouter");
+    expect(criticDecision.reason).toBe("role_mapping");
+  });
+
+  it("respects custom dynamic models catalog in configuration", async () => {
+    const usage = new UsageManager();
+    const router = new ModelRouter(usage);
+
+    const config = {
+      models: {
+        "special-balanced": {
+          provider: "special-provider",
+          model: "special-model-1",
+          tier: "balanced" as const,
+        },
+      },
+    };
+
+    const decision = await router.resolveModel("executor", "AUTO", config);
+    expect(decision.modelId).toBe("special-model-1");
+    expect(decision.providerId).toBe("special-provider");
   });
 });

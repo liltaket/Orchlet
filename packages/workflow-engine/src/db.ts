@@ -1,7 +1,7 @@
 import { DatabaseSync } from "node:sqlite";
 import * as path from "node:path";
 import * as fs from "node:fs";
-import { Logger } from "@orchlet/shared";
+import { generateId, Logger } from "@orchlet/shared";
 import type { Task, Checkpoint, TaskStatus } from "@orchlet/core";
 
 export class TaskStore {
@@ -19,80 +19,50 @@ export class TaskStore {
 
   private migrate(): void {
     this.db.exec(`
-      CREATE TABLE IF NOT EXISTS tasks (
-        id TEXT PRIMARY KEY,
-        intent TEXT NOT NULL,
-        status TEXT NOT NULL,
-        attention_state TEXT NOT NULL,
-        routing_mode TEXT NOT NULL,
-        repo_path TEXT NOT NULL,
-        base_branch TEXT NOT NULL,
-        work_branch TEXT NOT NULL,
-        worktree_path TEXT,
-        commit_sha TEXT,
-        plan_json TEXT,
-        review_json TEXT,
-        verification_json TEXT,
-        model_audit_json TEXT,
-        pr_number INTEGER,
-        pr_url TEXT,
-        error TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-
-      CREATE TABLE IF NOT EXISTS checkpoints (
-        id TEXT PRIMARY KEY,
-        task_id TEXT NOT NULL,
-        step_index INTEGER NOT NULL,
-        status TEXT NOT NULL,
-        git_ref TEXT NOT NULL,
-        snapshot_json TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        FOREIGN KEY (task_id) REFERENCES tasks (id)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks (status);
-      CREATE INDEX IF NOT EXISTS idx_checkpoints_task ON checkpoints (task_id);
-    `);
+      CREATE TABLE IF NOT EXISTS tasks (\n        id TEXT PRIMARY KEY,\n        intent TEXT NOT NULL,\n        status TEXT NOT NULL,\n        attention_state TEXT NOT NULL,\n        routing_mode TEXT NOT NULL,\n        repo_path TEXT NOT NULL,\n        base_branch TEXT NOT NULL,\n        work_branch TEXT NOT NULL,\n        worktree_path TEXT,\n        commit_sha TEXT,\n        plan_json TEXT,\n        review_json TEXT,\n        verification_json TEXT,\n        model_audit_json TEXT,\n        pr_number INTEGER,\n        pr_url TEXT,\n        error TEXT,\n        created_at TEXT NOT NULL,\n        updated_at TEXT NOT NULL\n      );\n\n      CREATE TABLE IF NOT EXISTS checkpoints (\n        id TEXT PRIMARY KEY,\n        task_id TEXT NOT NULL,\n        step_index INTEGER NOT NULL,\n        status TEXT NOT NULL,\n        git_ref TEXT NOT NULL,\n        snapshot_json TEXT NOT NULL,\n        created_at TEXT NOT NULL,\n        FOREIGN KEY (task_id) REFERENCES tasks (id)\n      );\n\n      CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks (status);\n      CREATE INDEX IF NOT EXISTS idx_checkpoints_task ON checkpoints (task_id);\n    `);
 
     // Safe column migrations for existing SQLite stores
     try {
+      this.db.exec(`ALTER TABLE tasks ADD COLUMN worktree_path TEXT;`);
+    } catch {}
+    try {
       this.db.exec(`ALTER TABLE tasks ADD COLUMN commit_sha TEXT;`);
-    } catch {
-      // Column may already exist
-    }
+    } catch {}
+    try {
+      this.db.exec(`ALTER TABLE tasks ADD COLUMN plan_json TEXT;`);
+    } catch {}
+    try {
+      this.db.exec(`ALTER TABLE tasks ADD COLUMN review_json TEXT;`);
+    } catch {}
     try {
       this.db.exec(`ALTER TABLE tasks ADD COLUMN verification_json TEXT;`);
-    } catch {
-      // Column may already exist
-    }
+    } catch {}
     try {
       this.db.exec(`ALTER TABLE tasks ADD COLUMN model_audit_json TEXT;`);
-    } catch {
-      // Column may already exist
-    }
+    } catch {}
+    try {
+      this.db.exec(`ALTER TABLE tasks ADD COLUMN pr_number INTEGER;`);
+    } catch {}
+    try {
+      this.db.exec(`ALTER TABLE tasks ADD COLUMN pr_url TEXT;`);
+    } catch {}
   }
 
   saveTask(task: Task): void {
     const stmt = this.db.prepare(`
       INSERT INTO tasks (
-        id, intent, status, attention_state, routing_mode,
-        repo_path, base_branch, work_branch, worktree_path, commit_sha,
-        plan_json, review_json, verification_json, model_audit_json,
-        pr_number, pr_url, error,
-        created_at, updated_at
-      ) VALUES (
-        ?, ?, ?, ?, ?,
-        ?, ?, ?, ?, ?,
-        ?, ?, ?, ?,
-        ?, ?, ?,
-        ?, ?
-      )
+        id, intent, status, attention_state, routing_mode, repo_path, base_branch,
+        work_branch, worktree_path, commit_sha, plan_json, review_json,
+        verification_json, model_audit_json, pr_number, pr_url, error, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(id) DO UPDATE SET
+        intent = excluded.intent,
         status = excluded.status,
         attention_state = excluded.attention_state,
         routing_mode = excluded.routing_mode,
+        repo_path = excluded.repo_path,
+        base_branch = excluded.base_branch,
+        work_branch = excluded.work_branch,
         worktree_path = excluded.worktree_path,
         commit_sha = excluded.commit_sha,
         plan_json = excluded.plan_json,
@@ -141,6 +111,27 @@ export class TaskStore {
     return rows.map((r) => this.mapTaskRow(r));
   }
 
+  createCheckpoint(
+    taskId: string,
+    status: TaskStatus,
+    gitRef: string,
+    snapshotData: Record<string, unknown> = {},
+  ): Checkpoint {
+    const existing = this.getCheckpoints(taskId);
+    const stepIndex = existing.length + 1;
+    const checkpoint: Checkpoint = {
+      id: generateId(),
+      taskId,
+      stepIndex,
+      status,
+      gitRef,
+      snapshotData,
+      createdAt: new Date().toISOString(),
+    };
+    this.saveCheckpoint(checkpoint);
+    return checkpoint;
+  }
+
   saveCheckpoint(checkpoint: Checkpoint): void {
     const stmt = this.db.prepare(`
       INSERT INTO checkpoints (id, task_id, step_index, status, git_ref, snapshot_json, created_at)
@@ -155,6 +146,20 @@ export class TaskStore {
       JSON.stringify(checkpoint.snapshotData),
       checkpoint.createdAt,
     );
+  }
+
+  getCheckpoints(taskId: string): Checkpoint[] {
+    const stmt = this.db.prepare(`SELECT * FROM checkpoints WHERE task_id = ? ORDER BY step_index ASC`);
+    const rows = stmt.all(taskId) as any[];
+    return rows.map((row) => ({
+      id: row.id,
+      taskId: row.task_id,
+      stepIndex: row.step_index,
+      status: row.status as TaskStatus,
+      gitRef: row.git_ref,
+      snapshotData: JSON.parse(row.snapshot_json),
+      createdAt: row.created_at,
+    }));
   }
 
   getLatestCheckpoint(taskId: string): Checkpoint | null {
@@ -189,7 +194,7 @@ export class TaskStore {
       plan: row.plan_json ? JSON.parse(row.plan_json) : undefined,
       latestReview: row.review_json ? JSON.parse(row.review_json) : undefined,
       verificationResults: row.verification_json ? JSON.parse(row.verification_json) : undefined,
-      modelUsageAudit: row.model_audit_json ? JSON.parse(row.model_audit_json) : undefined,
+      modelUsageAudit: row.model_audit_json ? JSON.parse(row.model_audit_json) : [],
       prNumber: row.pr_number || undefined,
       prUrl: row.pr_url || undefined,
       error: row.error || undefined,

@@ -12,8 +12,17 @@ services:
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - GITHUB_TOKEN=${GITHUB_TOKEN:-}
     volumes:
+      # Persistent storage for task checkpoints and SQLite database
       - orchlet-data:/root/.orchlet
+      # Controlled repository mount: map host repo directory to /repos inside container
+      - ./repos:/repos
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4774/health').then(r => r.ok ? process.exit(0) : process.exit(1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
 volumes:
   orchlet-data:

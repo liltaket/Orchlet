@@ -1,14 +1,14 @@
 import { describe, it, expect, vi } from "vitest";
-import * as os from "node:os";
-import * as path from "node:path";
 import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import * as os from "node:os";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { WorkflowEngine } from "../src/engine.js";
 import { TaskStore } from "../src/db.js";
-import { WorktreeManager } from "@orchlet/context";
 import { ModelRouter } from "@orchlet/routing";
 import { UsageManager } from "@orchlet/usage";
+import { WorktreeManager } from "@orchlet/context";
 import { IndependentReviewer, MockAgentProvider } from "@orchlet/providers";
 import { PRBabysitter } from "@orchlet/github";
 import { NotificationManager, type AttentionNotification } from "@orchlet/notifications";
@@ -84,12 +84,10 @@ describe("WorkflowEngine Vertical Slice V1", () => {
     expect(completedTask.commitSha?.length).toBe(40);
     expect(completedTask.prNumber).toBeUndefined();
 
-    // 7. Verify model usage audit trail
+    // 7. Verify model usage audit trail: only real models executed are audited (no fake planner entries)
     expect(completedTask.modelUsageAudit).toBeDefined();
-    expect(completedTask.modelUsageAudit?.length).toBeGreaterThanOrEqual(4);
+    expect(completedTask.modelUsageAudit?.length).toBeGreaterThanOrEqual(2);
     const rolesAudited = completedTask.modelUsageAudit?.map((a) => a.role);
-    expect(rolesAudited).toContain("planner");
-    expect(rolesAudited).toContain("architect");
     expect(rolesAudited).toContain("executor");
     expect(rolesAudited).toContain("critic");
 
@@ -113,6 +111,9 @@ describe("WorkflowEngine Vertical Slice V1", () => {
     await execFileAsync("git", ["init", "-b", "main"], { cwd: tempDir });
     await execFileAsync("git", ["config", "user.name", "Test Runner"], { cwd: tempDir });
     await execFileAsync("git", ["config", "user.email", "test@orchlet.dev"], { cwd: tempDir });
+    await execFileAsync("git", ["remote", "add", "origin", "https://github.com/orchlet-test/repo.git"], {
+      cwd: tempDir,
+    });
     await fs.writeFile(path.join(tempDir, "README.md"), "# Test Repo\n", "utf-8");
     await execFileAsync("git", ["add", "."], { cwd: tempDir });
     await execFileAsync("git", ["commit", "-m", "initial commit"], { cwd: tempDir });

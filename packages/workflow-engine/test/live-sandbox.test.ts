@@ -106,9 +106,9 @@ describe("Live Sandbox Repository Validation", () => {
     expect(result.latestReview?.verdict).toBe("APPROVED");
     expect(result.latestReview?.findings.length).toBe(0);
 
-    // Verify model usage audit trail
+    // Verify truthful model usage audit trail
     expect(result.modelUsageAudit).toBeDefined();
-    expect(result.modelUsageAudit?.length).toBeGreaterThanOrEqual(4);
+    expect(result.modelUsageAudit?.length).toBeGreaterThanOrEqual(2);
 
     // Verify SQLite durability
     const persisted = store.getTask(task.id);

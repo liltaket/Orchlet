@@ -32,7 +32,7 @@ export class ModelRouter implements IModelRouter {
     private usage: UsageManager = defaultUsageManager,
     config?: OrchletConfigData,
   ) {
-    if (config?.models) {
+    if (config?.models && Object.keys(config.models).length > 0) {
       this.loadCatalogFromConfig(config.models);
     } else {
       this.loadDefaultCatalog();
@@ -57,18 +57,15 @@ export class ModelRouter implements IModelRouter {
     this.catalog = {
       fast: [
         { providerId: "openrouter", modelId: "deepseek/deepseek-chat", tier: "fast", costWeight: 0.2 },
-        { providerId: "google", modelId: "gemini-2.5-flash", tier: "fast", costWeight: 0.3 },
-        { providerId: "openai", modelId: "gpt-4o-mini", tier: "fast", costWeight: 0.4 },
+        { providerId: "openrouter", modelId: "google/gemini-2.5-flash", tier: "fast", costWeight: 0.3 },
       ],
       balanced: [
-        { providerId: "openrouter", modelId: "anthropic/claude-3.7-sonnet", tier: "balanced", costWeight: 1.0 },
-        { providerId: "openai", modelId: "gpt-4o", tier: "balanced", costWeight: 0.9 },
-        { providerId: "google", modelId: "gemini-2.5-pro", tier: "balanced", costWeight: 1.0 },
+        { providerId: "openrouter", modelId: "deepseek/deepseek-chat", tier: "balanced", costWeight: 0.5 },
+        { providerId: "openrouter", modelId: "google/gemini-2.5-flash", tier: "balanced", costWeight: 0.5 },
       ],
       strong: [
-        { providerId: "openrouter", modelId: "anthropic/claude-3.7-sonnet", tier: "strong", costWeight: 3.0 },
-        { providerId: "openai", modelId: "o3-mini", tier: "strong", costWeight: 2.8 },
-        { providerId: "google", modelId: "gemini-2.5-pro", tier: "strong", costWeight: 3.0 },
+        { providerId: "openrouter", modelId: "google/gemini-2.5-pro", tier: "strong", costWeight: 2.0 },
+        { providerId: "openrouter", modelId: "deepseek/deepseek-chat", tier: "strong", costWeight: 1.0 },
       ],
     };
   }
@@ -104,9 +101,49 @@ export class ModelRouter implements IModelRouter {
     }
   }
 
-  async resolveModel(role: AgentRole, mode: RoutingMode = "AUTO"): Promise<RoutingDecision> {
-    const tier = this.resolveTierForRole(role, mode);
-    const candidates = this.catalog[tier] || [];
+  async resolveModel(
+    role: AgentRole,
+    mode: RoutingMode = "AUTO",
+    config?: OrchletConfigData,
+  ): Promise<RoutingDecision> {
+    // 1. Check explicit roleMappings from effective config
+    const roleMapping = config?.roleMappings?.[role];
+    if (roleMapping?.model) {
+      const providerId = roleMapping.provider || "openrouter";
+      const modelId = roleMapping.model;
+      const tier = roleMapping.tier || this.resolveTierForRole(role, mode);
+      return {
+        providerId,
+        modelId,
+        tier,
+        estimatedCostWeight: 1.0,
+        reason: "role_mapping",
+        fallbackHops: 0,
+        candidatesConsidered: [`${providerId}/${modelId}`],
+      };
+    }
+
+    // 2. If runtime config has custom models catalog, check dynamic catalog
+    let activeCatalog = this.catalog;
+    if (config?.models && Object.keys(config.models).length > 0) {
+      activeCatalog = { fast: [], balanced: [], strong: [] };
+      for (const entry of Object.values(config.models)) {
+        const tier: ModelTier =
+          entry.tier && (["fast", "balanced", "strong"] as const).includes(entry.tier)
+            ? entry.tier
+            : "balanced";
+        activeCatalog[tier].push({
+          providerId: entry.provider,
+          modelId: entry.model,
+          tier,
+          costWeight: entry.costWeight ?? (tier === "fast" ? 0.3 : tier === "balanced" ? 1.0 : 3.0),
+          strengths: entry.strengths,
+        });
+      }
+    }
+
+    const tier = roleMapping?.tier || this.resolveTierForRole(role, mode);
+    const candidates = activeCatalog[tier] || [];
     const candidatesConsidered: string[] = [];
 
     let fallbackHops = 0;
@@ -134,7 +171,7 @@ export class ModelRouter implements IModelRouter {
     // Fallback: If entire primary tier is constrained, search adjacent tier candidates with health validation
     const adjacentTiers: ModelTier[] = tier === "strong" ? ["balanced", "fast"] : ["fast", "balanced"];
     for (const adjTier of adjacentTiers) {
-      const fallbackCandidates = this.catalog[adjTier] || [];
+      const fallbackCandidates = activeCatalog[adjTier] || [];
       for (const fallback of fallbackCandidates) {
         const candidateTag = `${fallback.providerId}/${fallback.modelId}`;
         candidatesConsidered.push(candidateTag);
@@ -156,9 +193,10 @@ export class ModelRouter implements IModelRouter {
       }
     }
 
+    // All registered providers are exhausted/unhealthy
     throw new OrchletError(
-      `No healthy model found across any tier for role ${role} in mode ${mode}. Evaluated: ${candidatesConsidered.join(", ")}`,
-      "NO_HEALTHY_MODEL",
+      `All candidate providers exhausted or throttled for role '${role}' (tier ${tier}). Considered: ${candidatesConsidered.join(", ")}`,
+      "NO_HEALTHY_MODELS",
     );
   }
 }

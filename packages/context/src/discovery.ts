@@ -21,7 +21,17 @@ export class InstructionDiscoveryEngine {
 
   async discoverForPath(targetFilePath: string): Promise<DiscoveredInstruction[]> {
     const discovered: DiscoveredInstruction[] = [];
-    let currentDir = path.dirname(path.resolve(targetFilePath));
+    const resolvedTarget = path.resolve(targetFilePath);
+    let currentDir = resolvedTarget;
+    try {
+      const stat = await fs.stat(resolvedTarget);
+      if (!stat.isDirectory()) {
+        currentDir = path.dirname(resolvedTarget);
+      }
+    } catch {
+      currentDir = path.dirname(resolvedTarget);
+    }
+
     const resolvedRoot = path.resolve(this.projectRoot);
     const normalizedRootWithSep = resolvedRoot.endsWith(path.sep) ? resolvedRoot : resolvedRoot + path.sep;
 
@@ -50,58 +60,70 @@ export class InstructionDiscoveryEngine {
           }
         }
       }
-      if (currentDir === resolvedRoot) break;
-      const parent = path.dirname(currentDir);
-      if (parent === currentDir) break; // Reached root
-      currentDir = parent;
-    }
 
-    // Check .github/copilot-instructions.md at repo root
-    const copilotPath = path.join(resolvedRoot, ".github", "copilot-instructions.md");
-    if (!this.loadedPaths.has(copilotPath)) {
-      try {
-        const raw = await fs.readFile(copilotPath, "utf-8");
-        const sha256 = createHash("sha256").update(raw).digest("hex");
-        const relativePath = path.relative(this.projectRoot, copilotPath);
-        const parsed = this.parseInstructionFile(raw, copilotPath, relativePath, "COPILOT", sha256);
-        this.loadedPaths.add(copilotPath);
-        discovered.push(parsed);
-        this.logger.debug(`Loaded context instructions from: ${copilotPath}`);
-      } catch {
-        // Not present
+      // Check agent skills folders (e.g. .agents/skills/*/SKILL.md)
+      await this.discoverSkillsIn(currentDir, discovered);
+
+      if (currentDir === resolvedRoot) {
+        break; // Reached project root
       }
+      currentDir = path.dirname(currentDir);
     }
 
     return discovered;
   }
 
+  private async discoverSkillsIn(dir: string, discovered: DiscoveredInstruction[]): Promise<void> {
+    const skillFolders = [".agents/skills", ".claude/skills", ".orchlet/skills"];
+    for (const sub of skillFolders) {
+      const skillsPath = path.join(dir, sub);
+      try {
+        const entries = await fs.readdir(skillsPath, { withFileTypes: true });
+        for (const entry of entries) {
+          if (entry.isDirectory()) {
+            const skillFile = path.join(skillsPath, entry.name, "SKILL.md");
+            if (!this.loadedPaths.has(skillFile)) {
+              try {
+                const raw = await fs.readFile(skillFile, "utf-8");
+                const sha256 = createHash("sha256").update(raw).digest("hex");
+                const relativePath = path.relative(this.projectRoot, skillFile);
+                discovered.push(this.parseInstructionFile(raw, skillFile, relativePath, "OTHER", sha256));
+                this.loadedPaths.add(skillFile);
+              } catch {
+                // No SKILL.md
+              }
+            }
+          }
+        }
+      } catch {
+        // Skill dir does not exist
+      }
+    }
+  }
+
   private parseInstructionFile(
-    raw: string,
+    content: string,
     filePath: string,
     relativePath: string,
-    sourceType: "AGENTS" | "CLAUDE" | "GEMINI" | "COPILOT" | "ORCHLET" | "OTHER",
+    sourceType: DiscoveredInstruction["sourceType"],
     sha256: string,
   ): DiscoveredInstruction {
-    const frontmatterRegex = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/;
-    const match = frontmatterRegex.exec(raw);
-    if (!match) {
-      return {
-        filePath,
-        relativePath,
-        sourceType,
-        frontmatter: {},
-        content: raw.trim(),
-        sha256,
-      };
-    }
-
     const frontmatter: Record<string, string> = {};
-    for (const line of match[1].split("\n")) {
-      const idx = line.indexOf(":");
-      if (idx !== -1) {
-        const k = line.slice(0, idx).trim();
-        const v = line.slice(idx + 1).trim();
-        frontmatter[k] = v.replace(/^["']|["']$/g, "");
+    let cleanContent = content;
+
+    if (content.startsWith("---")) {
+      const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/);
+      if (match) {
+        cleanContent = match[2].trim();
+        const lines = match[1].split(/\r?\n/);
+        for (const line of lines) {
+          const colonIdx = line.indexOf(":");
+          if (colonIdx > 0) {
+            const key = line.slice(0, colonIdx).trim();
+            const val = line.slice(colonIdx + 1).trim();
+            frontmatter[key] = val;
+          }
+        }
       }
     }
 
@@ -110,7 +132,7 @@ export class InstructionDiscoveryEngine {
       relativePath,
       sourceType,
       frontmatter,
-      content: match[2].trim(),
+      content: cleanContent,
       sha256,
     };
   }
