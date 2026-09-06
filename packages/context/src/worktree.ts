@@ -60,13 +60,23 @@ export class WorktreeManager implements IWorktreeManager {
 
   async getDiff(worktreePath: string, baseBranch = "main"): Promise<string> {
     try {
-      const { stdout } = await execFileAsync("git", ["diff", `${baseBranch}...HEAD`], {
+      // Stage untracked files with intent-to-add so git diff includes newly created files
+      await execFileAsync("git", ["add", "-N", "."], { cwd: worktreePath }).catch(() => {});
+
+      const { stdout: branchDiff } = await execFileAsync("git", ["diff", `${baseBranch}...HEAD`], {
         cwd: worktreePath,
-      });
-      return stdout;
+      }).catch(() => ({ stdout: "" }));
+
+      const { stdout: worktreeDiff } = await execFileAsync("git", ["diff", "HEAD"], {
+        cwd: worktreePath,
+      }).catch(() => ({ stdout: "" }));
+
+      if (worktreeDiff.trim().length > 0) {
+        return worktreeDiff;
+      }
+      return branchDiff;
     } catch {
-      // Fallback to git diff HEAD or uncommitted diff
-      const { stdout } = await execFileAsync("git", ["diff", "HEAD"], { cwd: worktreePath }).catch(() => ({ stdout: "" }));
+      const { stdout } = await execFileAsync("git", ["diff"], { cwd: worktreePath }).catch(() => ({ stdout: "" }));
       return stdout;
     }
   }

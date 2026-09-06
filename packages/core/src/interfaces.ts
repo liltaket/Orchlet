@@ -1,12 +1,15 @@
 import type {
   Task,
-  TaskStatus,
-  Plan,
-  PlanStep,
   ReviewVerdict,
   RoutingMode,
   ModelTier,
   AgentRole,
+  AgentRequest,
+  AgentResult,
+  TaskPacket,
+  ReviewFinding,
+  VerificationResult,
+  OrchletConfig,
 } from "./types.js";
 
 export interface IWorkflowEngine {
@@ -24,6 +27,7 @@ export interface IModelRouter {
     modelId: string;
     tier: ModelTier;
     estimatedCostWeight: number;
+    reason?: string;
   }>;
 }
 
@@ -45,9 +49,33 @@ export interface IBabysitter {
     repoOwner: string,
     repoName: string,
     prNumber: number,
-    options?: { maxPollAttempts?: number; simulate?: boolean },
+    options?: { maxPollAttempts?: number; simulate?: boolean; autoMerge?: boolean },
   ): Promise<{
     merged: boolean;
+    readyToMerge?: boolean;
     reason?: string;
   }>;
+}
+
+export interface IAgentExecutor {
+  readonly harnessName: string;
+  execute(request: AgentRequest): Promise<AgentResult>;
+}
+
+export interface IVerificationRunner {
+  runVerification(commands: string[], worktreePath: string): Promise<VerificationResult[]>;
+}
+
+export interface IContextBuilder {
+  buildPacket(
+    taskId: string,
+    objective: string,
+    projectRoot: string,
+    audience: "implementer" | "reviewer",
+    options?: { planSummary?: string; blockingFindings?: ReviewFinding[] },
+  ): Promise<TaskPacket>;
+}
+
+export interface IConfigurationManager {
+  loadConfig(projectRoot?: string): Promise<OrchletConfig>;
 }

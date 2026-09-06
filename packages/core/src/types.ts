@@ -7,6 +7,7 @@ export type TaskStatus =
   | "REVIEWING"
   | "PR_OPENED"
   | "PR_BABYSITTING"
+  | "READY_TO_MERGE"
   | "COMPLETED"
   | "FAILED"
   | "PAUSED";
@@ -67,6 +68,118 @@ export interface ReviewVerdict {
   timestamp: string;
 }
 
+export interface ContextFile {
+  filePath: string;
+  relativePath: string;
+  sourceType: "AGENTS" | "CLAUDE" | "GEMINI" | "COPILOT" | "ORCHLET" | "OTHER";
+  content: string;
+  sha256: string;
+}
+
+export interface ContextBundle {
+  files: ContextFile[];
+  bundleFingerprint: string;
+  audience: "implementer" | "reviewer";
+}
+
+export interface TaskPacket {
+  taskId: string;
+  objective: string;
+  contextBundle: ContextBundle;
+  planSummary?: string;
+  handoffNotes?: string;
+  blockingFindings?: ReviewFinding[];
+}
+
+export interface AgentRequest {
+  taskId: string;
+  role: AgentRole;
+  userObjective: string;
+  taskPacket: TaskPacket;
+  worktreePath: string;
+  selectedModel: {
+    providerId: string;
+    modelId: string;
+    tier: ModelTier;
+  };
+  permissions: {
+    allowFileSystem: boolean;
+    allowBash: boolean;
+    allowNetwork?: boolean;
+  };
+  expectedSchema?: "json" | "plan" | "review" | "freeform";
+}
+
+export interface AgentResult {
+  success: boolean;
+  textResponse?: string;
+  structuredData?: Record<string, unknown>;
+  changedFiles: string[];
+  usage?: {
+    promptTokens?: number;
+    completionTokens?: number;
+    totalTokens?: number;
+    costEstimateUsd?: number;
+  };
+  modelUsed: string;
+  providerUsed: string;
+  durationMs: number;
+  error?: string;
+}
+
+export interface VerificationCommand {
+  name: string;
+  command: string;
+  cwd?: string;
+  timeoutMs?: number;
+}
+
+export interface VerificationResult {
+  command: string;
+  exitCode: number;
+  durationMs: number;
+  stdoutTail: string;
+  stderrTail: string;
+  passed: boolean;
+}
+
+export interface GitConfig {
+  push?: boolean;
+  openPr?: boolean;
+  autoMerge?: boolean;
+  baseBranch?: string;
+  commitAuthor?: {
+    name: string;
+    email: string;
+  };
+}
+
+export interface ModelConfigEntry {
+  provider: string;
+  model: string;
+  tier: ModelTier;
+  strengths?: string[];
+  costWeight?: number;
+}
+
+export interface OrchletConfig {
+  models?: Record<string, ModelConfigEntry>;
+  roleMappings?: Partial<Record<AgentRole, { tier?: ModelTier; model?: string; provider?: string }>>;
+  git?: GitConfig;
+  verification?: string[];
+  activeHarness?: "opencode" | "openrouter" | "mock";
+}
+
+export interface ModelUsageRecord {
+  role: AgentRole;
+  provider: string;
+  model: string;
+  durationMs: number;
+  tokens?: number;
+  costUsd?: number;
+  timestamp: string;
+}
+
 export interface Task {
   id: string;
   intent: string;
@@ -77,8 +190,11 @@ export interface Task {
   baseBranch: string;
   workBranch: string;
   worktreePath?: string;
+  commitSha?: string;
   plan?: Plan;
   latestReview?: ReviewVerdict;
+  verificationResults?: VerificationResult[];
+  modelUsageAudit?: ModelUsageRecord[];
   prNumber?: number;
   prUrl?: string;
   error?: string;

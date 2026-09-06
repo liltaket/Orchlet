@@ -7,19 +7,33 @@ export interface T3RuntimeConfig {
   pid: number;
   port: number;
   host: string;
-  protocol: string;
+  protocol?: string;
 }
 
 export class T3Client {
   private logger = new Logger({ prefix: "T3Client" });
   private baseUrl: string | null = null;
 
+  constructor(baseUrl?: string) {
+    if (baseUrl) this.baseUrl = baseUrl;
+  }
+
+  setBaseUrl(url: string | null): void {
+    this.baseUrl = url;
+  }
+
+  getBaseUrl(): string | null {
+    return this.baseUrl;
+  }
+
   async discoverRuntime(): Promise<T3RuntimeConfig | null> {
     try {
       const runtimePath = path.join(os.homedir(), ".t3", "userdata", "server-runtime.json");
       const content = await fs.readFile(runtimePath, "utf-8");
       const config: T3RuntimeConfig = JSON.parse(content);
-      this.baseUrl = `${config.protocol}://${config.host}:${config.port}`;
+      const protocol = config.protocol || "http";
+      const host = config.host === "0.0.0.0" ? "127.0.0.1" : config.host || "127.0.0.1";
+      this.baseUrl = `${protocol}://${host}:${config.port}`;
       this.logger.info(`Discovered live T3 server at: ${this.baseUrl} (pid: ${config.pid})`);
       return config;
     } catch {
@@ -37,7 +51,7 @@ export class T3Client {
     try {
       const res = await fetch(`${this.baseUrl}/.well-known/t3/environment`);
       if (res.ok) {
-        const data = await res.json() as any;
+        const data = (await res.json()) as any;
         return { ok: true, version: data.serverVersion };
       }
       return { ok: false };
@@ -46,7 +60,11 @@ export class T3Client {
     }
   }
 
-  async dispatchTurn(threadId: string, text: string, bearerToken?: string): Promise<{ ok: boolean; commandId?: string }> {
+  async dispatchTurn(
+    threadId: string,
+    text: string,
+    bearerToken?: string,
+  ): Promise<{ ok: boolean; commandId?: string }> {
     if (!this.baseUrl) {
       await this.discoverRuntime();
     }

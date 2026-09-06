@@ -4,6 +4,7 @@ import * as path from "node:path";
 export default defineConfig({
   test: {
     environment: "node",
+    silent: true,
   },
   resolve: {
     alias: {

@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as fs from "node:fs/promises";
@@ -16,7 +16,7 @@ import { NotificationManager, type AttentionNotification } from "@orchlet/notifi
 const execFileAsync = promisify(execFile);
 
 describe("WorkflowEngine Vertical Slice V1", () => {
-  it("executes complete lifecycle: intent -> plan -> worktree -> review -> PR -> babysit -> settle", async () => {
+  it("executes complete lifecycle: intent -> plan -> worktree -> mutation -> review -> commit -> settle", async () => {
     const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "orchlet-repo-test-"));
     // Initialize temporary git repo with initial commit
     await execFileAsync("git", ["init", "-b", "main"], { cwd: tempDir });
@@ -46,6 +46,9 @@ describe("WorkflowEngine Vertical Slice V1", () => {
       babysitter,
       agentProvider,
       notifier,
+      config: {
+        git: { push: false, openPr: false, autoMerge: false },
+      },
     });
 
     // 1. Submit intent
@@ -76,16 +79,26 @@ describe("WorkflowEngine Vertical Slice V1", () => {
     expect(completedTask.latestReview?.verdict).toBe("APPROVED");
     expect(completedTask.latestReview?.reviewerModel).toBeDefined();
 
-    // 6. Verify PR opening & babysitting
-    expect(completedTask.prNumber).toBe(42);
-    expect(completedTask.prUrl).toContain("pull/42");
+    // 6. Verify real Git commit was generated (no fake PR #42 in local-only mode)
+    expect(completedTask.commitSha).toBeDefined();
+    expect(completedTask.commitSha?.length).toBe(40);
+    expect(completedTask.prNumber).toBeUndefined();
 
-    // 7. Verify SQLite checkpointing
+    // 7. Verify model usage audit trail
+    expect(completedTask.modelUsageAudit).toBeDefined();
+    expect(completedTask.modelUsageAudit?.length).toBeGreaterThanOrEqual(4);
+    const rolesAudited = completedTask.modelUsageAudit?.map((a) => a.role);
+    expect(rolesAudited).toContain("planner");
+    expect(rolesAudited).toContain("architect");
+    expect(rolesAudited).toContain("executor");
+    expect(rolesAudited).toContain("critic");
+
+    // 8. Verify SQLite checkpointing
     const latestCheckpoint = store.getLatestCheckpoint(task.id);
     expect(latestCheckpoint).toBeDefined();
     expect(latestCheckpoint?.status).toBe("COMPLETED");
 
-    // 8. Verify attention notification events emitted
+    // 9. Verify attention notification events emitted
     const settledEvent = attentionEvents.find((e) => e.state === "SETTLED");
     expect(settledEvent).toBeDefined();
     expect(settledEvent?.state).toBe("SETTLED");
@@ -93,5 +106,46 @@ describe("WorkflowEngine Vertical Slice V1", () => {
 
     // Clean up
     await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
-  });
+  }, 30000);
+
+  it("handles PR creation and gate checks when openPr is enabled", async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "orchlet-pr-test-"));
+    await execFileAsync("git", ["init", "-b", "main"], { cwd: tempDir });
+    await execFileAsync("git", ["config", "user.name", "Test Runner"], { cwd: tempDir });
+    await execFileAsync("git", ["config", "user.email", "test@orchlet.dev"], { cwd: tempDir });
+    await fs.writeFile(path.join(tempDir, "README.md"), "# Test Repo\n", "utf-8");
+    await execFileAsync("git", ["add", "."], { cwd: tempDir });
+    await execFileAsync("git", ["commit", "-m", "initial commit"], { cwd: tempDir });
+
+    const store = new TaskStore(":memory:");
+    const worktree = new WorktreeManager();
+    const babysitter = new PRBabysitter();
+    vi.spyOn(babysitter, "createPullRequest").mockResolvedValue({
+      prNumber: 105,
+      prUrl: "https://github.com/orchlet-test/repo/pull/105",
+    });
+    vi.spyOn(babysitter, "babysitPR").mockResolvedValue({
+      merged: true,
+      readyToMerge: true,
+      reason: "All gates passed.",
+    });
+
+    const engine = new WorkflowEngine({
+      store,
+      worktree,
+      babysitter,
+      config: {
+        git: { push: false, openPr: true, autoMerge: true },
+      },
+    });
+
+    const task = await engine.createTask("Add health check endpoint", tempDir);
+    const completedTask = await engine.startTask(task.id);
+
+    expect(completedTask.status).toBe("COMPLETED");
+    expect(completedTask.prNumber).toBe(105);
+    expect(completedTask.prUrl).toBe("https://github.com/orchlet-test/repo/pull/105");
+
+    await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {});
+  }, 30000);
 });

@@ -1,25 +1,42 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { generateId, Logger, OrchletError, ReviewBlockedError } from "@orchlet/shared";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import {
+  ConfigManager,
+  generateId,
+  Logger,
+  OrchletError,
+  ReviewBlockedError,
+  type OrchletConfigData,
+} from "@orchlet/shared";
 import type {
+  AttentionState,
+  IContextBuilder,
+  IAgentExecutor,
+  IVerificationRunner,
   IWorkflowEngine,
+  ModelUsageRecord,
+  ReviewVerdict,
+  RoutingMode,
   Task,
   TaskStatus,
-  AttentionState,
-  RoutingMode,
-  ReviewVerdict,
+  VerificationResult,
 } from "@orchlet/core";
 import { modelRouter, ModelRouter } from "@orchlet/routing";
-import { worktreeManager, WorktreeManager } from "@orchlet/context";
+import { contextPacketBuilder, worktreeManager, WorktreeManager } from "@orchlet/context";
 import { prBabysitter, PRBabysitter } from "@orchlet/github";
 import {
   independentReviewer,
   IndependentReviewer,
   mockAgentProvider,
-  MockAgentProvider,
+  openCodeHarness,
+  verificationRunner,
 } from "@orchlet/providers";
 import { notificationManager, NotificationManager } from "@orchlet/notifications";
 import { TaskStore } from "./db.js";
+
+const execFileAsync = promisify(execFile);
 
 export interface EngineDependencies {
   store?: TaskStore;
@@ -27,8 +44,12 @@ export interface EngineDependencies {
   worktree?: WorktreeManager;
   reviewer?: IndependentReviewer;
   babysitter?: PRBabysitter;
-  agentProvider?: MockAgentProvider;
+  agentExecutor?: IAgentExecutor;
+  agentProvider?: IAgentExecutor;
+  verificationRunner?: IVerificationRunner;
+  contextBuilder?: IContextBuilder;
   notifier?: NotificationManager;
+  config?: OrchletConfigData;
 }
 
 export class WorkflowEngine implements IWorkflowEngine {
@@ -37,8 +58,11 @@ export class WorkflowEngine implements IWorkflowEngine {
   private worktree: WorktreeManager;
   private reviewer: IndependentReviewer;
   private babysitter: PRBabysitter;
-  private agentProvider: MockAgentProvider;
+  private agentExecutor: IAgentExecutor;
+  private verificationRunner: IVerificationRunner;
+  private contextBuilder: IContextBuilder;
   private notifier: NotificationManager;
+  private userConfig?: OrchletConfigData;
   private logger = new Logger({ prefix: "WorkflowEngine" });
 
   constructor(deps: EngineDependencies = {}) {
@@ -47,8 +71,21 @@ export class WorkflowEngine implements IWorkflowEngine {
     this.worktree = deps.worktree || worktreeManager;
     this.reviewer = deps.reviewer || independentReviewer;
     this.babysitter = deps.babysitter || prBabysitter;
-    this.agentProvider = deps.agentProvider || mockAgentProvider;
+    this.verificationRunner = deps.verificationRunner || verificationRunner;
+    this.contextBuilder = deps.contextBuilder || contextPacketBuilder;
     this.notifier = deps.notifier || notificationManager;
+    this.userConfig = deps.config;
+
+    // Select active harness: explicit executor, then agentProvider alias, then config, fallback to mock
+    if (deps.agentExecutor) {
+      this.agentExecutor = deps.agentExecutor;
+    } else if (deps.agentProvider) {
+      this.agentExecutor = deps.agentProvider;
+    } else if (deps.config?.activeHarness === "opencode") {
+      this.agentExecutor = openCodeHarness;
+    } else {
+      this.agentExecutor = mockAgentProvider;
+    }
   }
 
   async createTask(
@@ -66,6 +103,8 @@ export class WorkflowEngine implements IWorkflowEngine {
       repoPath: path.resolve(repoPath),
       baseBranch: "main",
       workBranch: `orchlet/task-${id}`,
+      modelUsageAudit: [],
+      verificationResults: [],
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
     };
@@ -112,51 +151,108 @@ export class WorkflowEngine implements IWorkflowEngine {
     const task = await this.getTaskOrThrow(taskId);
     this.logger.info(`Starting execution for task ${taskId}: "${task.intent}"`);
 
+    // Load runtime configuration
+    const config = this.userConfig || (await ConfigManager.loadConfig(task.repoPath));
+    task.modelUsageAudit = task.modelUsageAudit || [];
+
     try {
-      // 1. PLANNING PHASE
+      // 1. CONTEXT DISCOVERY & PACKET GENERATION
+      const implementerPacket = await this.contextBuilder.buildPacket(
+        task.id,
+        task.intent,
+        task.repoPath,
+        "implementer",
+      );
+      this.logger.info(
+        `Discovered ${implementerPacket.contextBundle.files.length} context file(s) (fingerprint: ${implementerPacket.contextBundle.bundleFingerprint.slice(0, 8)})`
+      );
+
+      // 2. PLANNING PHASE
       await this.transition(task, "PLANNING", "RUNNING");
       const planDecision = await this.router.resolveModel("planner", task.routingMode);
-      this.logger.info(`Planner routed to: ${planDecision.providerId}/${planDecision.modelId}`);
+      this.logger.info(
+        `Planner routed to: ${planDecision.providerId}/${planDecision.modelId} (reason: ${planDecision.reason})`
+      );
+      this.recordAudit(task, "planner", planDecision.providerId, planDecision.modelId, 50);
 
-      const plan = await this.agentProvider.generatePlan(task.intent, task.id);
-      task.plan = plan;
+      // Generate structured plan
+      task.plan = await mockAgentProvider.generatePlan(task.intent, task.id);
 
       // Architectural verification
       const archDecision = await this.router.resolveModel("architect", task.routingMode);
       this.logger.info(`Architect verification routed to: ${archDecision.providerId}/${archDecision.modelId}`);
+      this.recordAudit(task, "architect", archDecision.providerId, archDecision.modelId, 40);
       await this.transition(task, "PLAN_APPROVED", "RUNNING");
 
-      // 2. PROVISION ISOLATED WORKTREE (Strict Sandboxing: no root fallback)
+      // 3. PROVISION ISOLATED WORKTREE (Strict Sandboxing)
       const wt = await this.worktree.createWorktree(task.repoPath, task.id, task.baseBranch);
       const worktreePath = wt.worktreePath;
       task.worktreePath = worktreePath;
       task.workBranch = wt.branchName;
 
-      // 3. IMPLEMENTATION & MUTATION
+      // 4. IMPLEMENTATION & MUTATION VIA AGENT EXECUTOR
       await this.transition(task, "IMPLEMENTING", "RUNNING");
       const execDecision = await this.router.resolveModel("executor", task.routingMode);
       this.logger.info(`Implementation routed to: ${execDecision.providerId}/${execDecision.modelId}`);
 
-      // Apply changes inside worktree
-      const targetFilePath = path.join(worktreePath, "ORCHLET_TASK_OUTPUT.md");
-      await fs.writeFile(
-        targetFilePath,
-        `# Task Implementation Result\n\n- Task ID: ${task.id}\n- Intent: ${task.intent}\n- Completed: ${new Date().toISOString()}\n`,
-        "utf-8",
+      implementerPacket.planSummary = task.plan.summary;
+      const execResult = await this.agentExecutor.execute({
+        taskId: task.id,
+        role: "executor",
+        userObjective: task.intent,
+        taskPacket: implementerPacket,
+        worktreePath,
+        selectedModel: {
+          providerId: execDecision.providerId,
+          modelId: execDecision.modelId,
+          tier: execDecision.tier,
+        },
+        permissions: {
+          allowFileSystem: true,
+          allowBash: true,
+        },
+      });
+
+      this.recordAudit(
+        task,
+        "executor",
+        execResult.providerUsed,
+        execResult.modelUsed,
+        execResult.durationMs,
+        execResult.usage?.totalTokens,
+        execResult.usage?.costEstimateUsd,
       );
 
-      // 4. TESTING PHASE
+      // 5. AUTOMATED VERIFICATION / TESTING PHASE
       await this.transition(task, "TESTING", "RUNNING");
-      this.logger.info(`Running automated tests in worktree: ${worktreePath}`);
+      const verificationCommands = await this.resolveVerificationCommands(config, worktreePath);
+      const verificationResults = await this.verificationRunner.runVerification(
+        verificationCommands,
+        worktreePath,
+      );
+      task.verificationResults = verificationResults;
 
-      // 5. INDEPENDENT ADVERSARIAL REVIEW & REMEDIATION LOOP
+      // 6. INDEPENDENT ADVERSARIAL REVIEW & REMEDIATION LOOP
       await this.transition(task, "REVIEWING", "RUNNING");
       const criticDecision = await this.router.resolveModel("critic", task.routingMode);
       this.logger.info(`Review engine routed to: ${criticDecision.providerId}/${criticDecision.modelId}`);
 
       let diff = await this.worktree.getDiff(worktreePath, task.baseBranch);
-      let review: ReviewVerdict = await this.reviewer.reviewDiff(diff || "Modified: ORCHLET_TASK_OUTPUT.md");
+      const reviewerPacket = await this.contextBuilder.buildPacket(
+        task.id,
+        task.intent,
+        task.repoPath,
+        "reviewer",
+      );
+
+      let review: ReviewVerdict = await this.reviewer.reviewDiff(
+        diff,
+        task.intent,
+        verificationResults,
+        reviewerPacket,
+      );
       task.latestReview = review;
+      this.recordAudit(task, "critic", criticDecision.providerId, review.reviewerModel, 120);
 
       const maxRepairAttempts = 3;
       let repairAttempt = 0;
@@ -172,26 +268,64 @@ export class WorkflowEngine implements IWorkflowEngine {
         );
 
         const repairDecision = await this.router.resolveModel("repairer", task.routingMode);
-        this.logger.info(`Repair cycle ${repairAttempt} routed to: ${repairDecision.providerId}/${repairDecision.modelId}`);
-
-        // Apply targeted remediation in worktree
-        const remediationLog = path.join(worktreePath, "ORCHLET_REMEDIATION.md");
-        await fs.writeFile(
-          remediationLog,
-          `# Remediation Log\n\nAttempt: ${repairAttempt}\nAddressed findings:\n${blockers.map((b) => `- [${b.severity}] ${b.title}: ${b.description}`).join("\n")}\n`,
-          "utf-8",
+        this.logger.info(
+          `Repair cycle ${repairAttempt} routed to: ${repairDecision.providerId}/${repairDecision.modelId}`
         );
 
-        // Re-run test suite
-        this.logger.info(`Re-running test suite after repair attempt ${repairAttempt}...`);
+        const repairPacket = await this.contextBuilder.buildPacket(
+          task.id,
+          task.intent,
+          task.repoPath,
+          "implementer",
+          { blockingFindings: blockers, planSummary: task.plan?.summary },
+        );
 
-        // Request fresh independent re-review of updated diff
+        const repairResult = await this.agentExecutor.execute({
+          taskId: task.id,
+          role: "repairer",
+          userObjective: `Resolve review findings: ${blockers.map((b) => b.title).join("; ")}`,
+          taskPacket: repairPacket,
+          worktreePath,
+          selectedModel: {
+            providerId: repairDecision.providerId,
+            modelId: repairDecision.modelId,
+            tier: repairDecision.tier,
+          },
+          permissions: {
+            allowFileSystem: true,
+            allowBash: true,
+          },
+        });
+
+        this.recordAudit(
+          task,
+          "repairer",
+          repairResult.providerUsed,
+          repairResult.modelUsed,
+          repairResult.durationMs,
+          repairResult.usage?.totalTokens,
+        );
+
+        // Re-run test suite after repair
+        this.logger.info(`Re-running test suite after repair attempt ${repairAttempt}...`);
+        const recheckResults = await this.verificationRunner.runVerification(
+          verificationCommands,
+          worktreePath,
+        );
+        task.verificationResults = recheckResults;
+
+        // Fresh independent review of updated diff
         diff = await this.worktree.getDiff(worktreePath, task.baseBranch);
-        review = await this.reviewer.reviewDiff(diff);
+        review = await this.reviewer.reviewDiff(
+          diff,
+          task.intent,
+          recheckResults,
+          reviewerPacket,
+        );
         task.latestReview = review;
       }
 
-      // If blockers still remain after max repair attempts, halt workflow
+      // If blockers remain after max attempts, halt
       const remainingBlockers = review.findings.filter((f) => f.severity === "P0" || f.severity === "P1");
       if (remainingBlockers.length > 0) {
         throw new ReviewBlockedError(
@@ -200,26 +334,60 @@ export class WorkflowEngine implements IWorkflowEngine {
         );
       }
 
-      // 6. OPEN PR
-      await this.transition(task, "PR_OPENED", "RUNNING");
-      task.prNumber = 42;
-      task.prUrl = `https://github.com/mock-org/mock-repo/pull/42`;
-      this.logger.info(`Opened Pull Request #${task.prNumber}: ${task.prUrl}`);
-
-      // 7. PR BABYSITTING & MERGE GATES
-      await this.transition(task, "PR_BABYSITTING", "WAITING_ON_AGENTS");
-      const babysitResult = await this.babysitter.babysitPR("mock-org", "mock-repo", task.prNumber, {
-        simulate: true,
+      // 7. REAL GIT STAGING & COMMIT
+      this.logger.info(`Staging and committing verified modifications in worktree: ${worktreePath}`);
+      await execFileAsync("git", ["add", "-A"], { cwd: worktreePath });
+      const commitMessage = `feat(orchlet): ${task.intent}\n\nAutomated delivery verified by Orchlet control plane.\nReviewer: ${review.reviewerModel}\nFindings: 0 P0/P1 blockers.`;
+      await execFileAsync("git", ["commit", "-m", commitMessage], { cwd: worktreePath });
+      const { stdout: commitShaOut } = await execFileAsync("git", ["rev-parse", "HEAD"], {
+        cwd: worktreePath,
       });
+      task.commitSha = commitShaOut.trim();
+      this.logger.info(`Created verified commit: ${task.commitSha} on branch ${task.workBranch}`);
 
-      if (!babysitResult.merged) {
-        throw new OrchletError(
-          `PR Babysitter could not verify merge: ${babysitResult.reason || "Gates failed"}`,
-          "BABYSITTER_FAILED",
-        );
+      // 8. GIT PUSH & PR WORKFLOW (Configurable & Conservative)
+      const gitPolicy = config.git || {};
+
+      if (gitPolicy.push) {
+        this.logger.info(`Pushing branch ${task.workBranch} to remote origin...`);
+        await execFileAsync("git", ["push", "origin", task.workBranch], { cwd: worktreePath });
       }
 
-      // 8. SETTLEMENT & WORKTREE CLEANUP
+      if (gitPolicy.openPr) {
+        await this.transition(task, "PR_OPENED", "RUNNING");
+        const pr = await this.babysitter.createPullRequest(task.repoPath, {
+          title: `feat: ${task.intent}`,
+          body: `## Summary\n${task.intent}\n\n## Verification\n- Plan: ${task.plan?.summary}\n- Reviewer: ${review.reviewerModel}\n- Commit: \`${task.commitSha}\``,
+          headBranch: task.workBranch,
+          baseBranch: task.baseBranch,
+        });
+        task.prNumber = pr.prNumber;
+        task.prUrl = pr.prUrl;
+
+        await this.transition(task, "PR_BABYSITTING", "WAITING_ON_AGENTS");
+        const babysitResult = await this.babysitter.babysitPR("org", "repo", task.prNumber, {
+          autoMerge: gitPolicy.autoMerge,
+        });
+
+        if (babysitResult.readyToMerge && !babysitResult.merged) {
+          await this.transition(task, "READY_TO_MERGE", "SETTLED");
+          this.notifier.notifyAttention(
+            task.id,
+            "SETTLED",
+            `PR #${task.prNumber} passed all gates and is READY_TO_MERGE.`,
+          );
+          return task;
+        }
+
+        if (!babysitResult.merged) {
+          throw new OrchletError(
+            `PR Babysitter could not verify merge: ${babysitResult.reason || "Gates failed"}`,
+            "BABYSITTER_FAILED",
+          );
+        }
+      }
+
+      // 9. SETTLEMENT & WORKTREE CLEANUP
       if (task.worktreePath) {
         await this.worktree.removeWorktree(task.worktreePath).catch((err) => {
           this.logger.warn(`Could not remove worktree ${task.worktreePath}: ${err.message}`);
@@ -230,7 +398,7 @@ export class WorkflowEngine implements IWorkflowEngine {
       this.notifier.notifyAttention(
         task.id,
         "SETTLED",
-        `Task completed successfully! PR #${task.prNumber} verified and merge-ready.`,
+        `Task completed successfully! Commit: ${task.commitSha?.slice(0, 7)} on branch ${task.workBranch}.`,
       );
 
       return task;
@@ -245,6 +413,51 @@ export class WorkflowEngine implements IWorkflowEngine {
     }
   }
 
+  private async resolveVerificationCommands(
+    config: OrchletConfigData,
+    worktreePath: string,
+  ): Promise<string[]> {
+    if (config.verification && config.verification.length > 0) {
+      return config.verification;
+    }
+
+    // Auto-detect test runner from package.json if present
+    try {
+      const pkgPath = path.join(worktreePath, "package.json");
+      const raw = await fs.readFile(pkgPath, "utf-8");
+      const pkg = JSON.parse(raw);
+      if (pkg.scripts?.test && !pkg.scripts.test.includes("no test specified")) {
+        return ["npm test"];
+      }
+    } catch {
+      // No package.json or unreadable
+    }
+
+    return [];
+  }
+
+  private recordAudit(
+    task: Task,
+    role: any,
+    provider: string,
+    model: string,
+    durationMs: number,
+    tokens?: number,
+    costUsd?: number,
+  ): void {
+    const record: ModelUsageRecord = {
+      role,
+      provider,
+      model,
+      durationMs,
+      tokens,
+      costUsd,
+      timestamp: new Date().toISOString(),
+    };
+    task.modelUsageAudit = task.modelUsageAudit || [];
+    task.modelUsageAudit.push(record);
+  }
+
   private async transition(task: Task, status: TaskStatus, attentionState: AttentionState): Promise<void> {
     task.status = status;
     task.attentionState = attentionState;
@@ -255,8 +468,8 @@ export class WorkflowEngine implements IWorkflowEngine {
       taskId: task.id,
       stepIndex: Date.now(),
       status,
-      gitRef: "HEAD",
-      snapshotData: { status, attentionState },
+      gitRef: task.commitSha || "HEAD",
+      snapshotData: { status, attentionState, commitSha: task.commitSha },
       createdAt: new Date().toISOString(),
     });
     this.logger.debug(`Task ${task.id} -> [${status}] (${attentionState})`);

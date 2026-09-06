@@ -1,5 +1,22 @@
 import React, { useState, useEffect, useRef } from "react";
 
+interface ModelUsageRecord {
+  role: string;
+  provider: string;
+  model: string;
+  durationMs: number;
+  tokens?: number;
+  costUsd?: number;
+  timestamp: string;
+}
+
+interface VerificationResult {
+  command: string;
+  exitCode: number;
+  durationMs: number;
+  passed: boolean;
+}
+
 interface Task {
   id: string;
   intent: string;
@@ -8,9 +25,12 @@ interface Task {
   routingMode: string;
   repoPath: string;
   workBranch: string;
+  commitSha?: string;
   prNumber?: number;
   prUrl?: string;
   error?: string;
+  modelUsageAudit?: ModelUsageRecord[];
+  verificationResults?: VerificationResult[];
   updatedAt: string;
 }
 
@@ -19,6 +39,9 @@ export function App() {
   const [intent, setIntent] = useState("");
   const [repoPath, setRepoPath] = useState(".");
   const [routingMode, setRoutingMode] = useState("AUTO");
+  const [daemonUrl, setDaemonUrl] = useState(() => {
+    return localStorage.getItem("orchlet_daemon_url") || (window.location.port === "4774" ? window.location.origin : "http://127.0.0.1:4774");
+  });
   const [authToken, setAuthToken] = useState(
     () => localStorage.getItem("orchlet_token") || "",
   );
@@ -26,6 +49,8 @@ export function App() {
   const [wsConnected, setWsConnected] = useState(false);
   const [notifications, setNotifications] = useState<string[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
+
+  const cleanDaemonUrl = daemonUrl.replace(/\/+$/, "");
 
   const getHeaders = (): Record<string, string> => {
     const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -37,7 +62,7 @@ export function App() {
 
   const fetchTasks = async () => {
     try {
-      const res = await fetch("http://127.0.0.1:4774/api/tasks", {
+      const res = await fetch(`${cleanDaemonUrl}/api/tasks`, {
         headers: getHeaders(),
       });
       if (res.ok) {
@@ -45,7 +70,7 @@ export function App() {
         setTasks(data);
       }
     } catch {
-      // Daemon may not be running yet
+      // Daemon may not be reachable
     }
   };
 
@@ -54,52 +79,58 @@ export function App() {
     fetchTasks();
 
     const connectWs = () => {
-      const tokenParam = authToken ? `?token=${encodeURIComponent(authToken.trim())}` : "";
-      const ws = new WebSocket(`ws://127.0.0.1:4774/api/stream${tokenParam}`);
-      wsRef.current = ws;
+      try {
+        const wsProtocol = cleanDaemonUrl.startsWith("https") ? "wss:" : "ws:";
+        const host = cleanDaemonUrl.replace(/^https?:\/\//, "");
+        const tokenParam = authToken ? `?token=${encodeURIComponent(authToken.trim())}` : "";
+        const ws = new WebSocket(`${wsProtocol}//${host}/api/stream${tokenParam}`);
+        wsRef.current = ws;
 
-      ws.onopen = () => setWsConnected(true);
-      ws.onclose = () => {
-        setWsConnected(false);
-        setTimeout(connectWs, 4000);
-      };
+        ws.onopen = () => setWsConnected(true);
+        ws.onclose = () => {
+          setWsConnected(false);
+          setTimeout(connectWs, 4000);
+        };
 
-      ws.onmessage = (event) => {
-        try {
-          const msg = JSON.parse(event.data);
-          if (msg.type === "notification") {
-            const notif = msg.payload;
-            setNotifications((prev) => [
-              `[${new Date(notif.timestamp).toLocaleTimeString()}] ${notif.message}`,
-              ...prev.slice(0, 19),
-            ]);
-            fetchTasks();
+        ws.onmessage = (event) => {
+          try {
+            const msg = JSON.parse(event.data);
+            if (msg.type === "notification") {
+              const notif = msg.payload;
+              setNotifications((prev) => [
+                `[${new Date(notif.timestamp).toLocaleTimeString()}] ${notif.message}`,
+                ...prev.slice(0, 19),
+              ]);
+              fetchTasks();
+            }
+          } catch {
+            // Ignore non-json frames
           }
-        } catch {
-          // Ignore non-json frames
-        }
-      };
+        };
+      } catch {
+        setWsConnected(false);
+      }
     };
 
     connectWs();
     return () => {
       wsRef.current?.close();
     };
-  }, [authToken]);
+  }, [authToken, daemonUrl]);
 
   const handleCreateTask = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!intent.trim()) return;
     setLoading(true);
     try {
-      const res = await fetch("http://127.0.0.1:4774/api/tasks", {
+      const res = await fetch(`${cleanDaemonUrl}/api/tasks`, {
         method: "POST",
         headers: getHeaders(),
         body: JSON.stringify({ intent, repoPath, routingMode }),
       });
       if (res.ok) {
         const newTask = await res.json();
-        await fetch(`http://127.0.0.1:4774/api/tasks/${newTask.id}/start`, {
+        await fetch(`${cleanDaemonUrl}/api/tasks/${newTask.id}/start`, {
           method: "POST",
           headers: getHeaders(),
           body: JSON.stringify({}),
@@ -114,9 +145,10 @@ export function App() {
 
   const getStatusBadge = (status: string, attention: string) => {
     let color = "#58a6ff";
-    if (attention === "SETTLED") color = "#3fb950";
-    if (attention === "NEEDS_ATTENTION") color = "#f85149";
-    if (attention === "WAITING_ON_AGENTS") color = "#d29922";
+    if (status === "READY_TO_MERGE") color = "#a371f7";
+    else if (attention === "SETTLED") color = "#3fb950";
+    else if (attention === "NEEDS_ATTENTION") color = "#f85149";
+    else if (attention === "WAITING_ON_AGENTS") color = "#d29922";
 
     return (
       <span
@@ -137,18 +169,36 @@ export function App() {
   };
 
   return (
-    <div style={{ maxWidth: "1080px", margin: "0 auto", padding: "36px 20px" }}>
-      <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "28px" }}>
+    <div style={{ maxWidth: "1120px", margin: "0 auto", padding: "36px 20px" }}>
+      <header style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: "28px", flexWrap: "wrap", gap: "16px" }}>
         <div>
           <h1 style={{ margin: 0, fontSize: "28px", color: "#f0f6fc", display: "flex", alignItems: "center", gap: "10px" }}>
             <span>⚡ Orchlet</span>
             <span style={{ fontSize: "14px", fontWeight: "normal", color: "#8b949e" }}>v0.1.0 Control Plane</span>
           </h1>
           <p style={{ margin: "6px 0 0 0", color: "#8b949e" }}>
-            State intent once. Orchlet plans, models, executes, reviews, and babysits PRs to clean merge.
+            Autonomous coding-agent orchestrator: plan, execute, verify, independent review, and merge-ready PRs.
           </p>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "10px", flexWrap: "wrap" }}>
+          <input
+            type="text"
+            placeholder="Daemon URL"
+            value={daemonUrl}
+            onChange={(e) => {
+              setDaemonUrl(e.target.value);
+              localStorage.setItem("orchlet_daemon_url", e.target.value);
+            }}
+            style={{
+              backgroundColor: "#161b22",
+              border: "1px solid #30363d",
+              borderRadius: "6px",
+              padding: "6px 10px",
+              color: "#c9d1d9",
+              fontSize: "12px",
+              width: "160px",
+            }}
+          />
           <input
             type="password"
             placeholder="Bearer Token"
@@ -164,7 +214,7 @@ export function App() {
               padding: "6px 10px",
               color: "#c9d1d9",
               fontSize: "12px",
-              width: "140px",
+              width: "130px",
             }}
           />
           <span
@@ -223,14 +273,14 @@ export function App() {
                 backgroundColor: "#0d1117",
                 border: "1px solid #30363d",
                 borderRadius: "6px",
+                padding: "8px 12px",
                 color: "#c9d1d9",
-                padding: "8px 10px",
                 fontSize: "13px",
               }}
             >
-              <option value="AUTO">AUTO (Cost & Quality Optimal)</option>
-              <option value="CHEAP">CHEAP (Fastest & Minimal Cost)</option>
-              <option value="QUALITY">QUALITY (Balanced & Strong Review)</option>
+              <option value="AUTO">AUTO (Cost-Performance Optimized)</option>
+              <option value="CHEAP">CHEAP (Budget-Constrained)</option>
+              <option value="QUALITY">QUALITY (High Capability)</option>
               <option value="BEST">BEST (Maximum Reasoning)</option>
             </select>
             <button
@@ -238,75 +288,160 @@ export function App() {
               disabled={loading || !intent.trim()}
               style={{
                 backgroundColor: "#238636",
-                color: "#ffffff",
                 border: "none",
                 borderRadius: "6px",
-                padding: "8px 20px",
+                color: "#fff",
                 fontWeight: 600,
-                fontSize: "14px",
-                cursor: "pointer",
-                whiteSpace: "nowrap",
+                padding: "8px 20px",
+                cursor: loading ? "not-allowed" : "pointer",
+                opacity: loading ? 0.7 : 1,
               }}
             >
-              {loading ? "Launching..." : "Launch Task"}
+              {loading ? "Dispatching..." : "Launch Workflow"}
             </button>
           </div>
         </form>
       </section>
 
-      {notifications.length > 0 && (
-        <section style={{ backgroundColor: "#161b22", border: "1px solid #30363d", borderRadius: "8px", padding: "16px", marginBottom: "28px" }}>
-          <h3 style={{ margin: "0 0 10px 0", fontSize: "14px", color: "#8b949e", textTransform: "uppercase" }}>Live Event Feed</h3>
-          <div style={{ maxHeight: "120px", overflowY: "auto", fontSize: "13px", color: "#c9d1d9", display: "flex", flexDirection: "column", gap: "4px" }}>
-            {notifications.map((msg, idx) => (
-              <div key={idx} style={{ fontFamily: "monospace" }}>{msg}</div>
-            ))}
+      <div style={{ display: "grid", gridTemplateColumns: "2fr 1fr", gap: "24px" }}>
+        <section>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "16px" }}>
+            <h2 style={{ margin: 0, fontSize: "18px", color: "#f0f6fc" }}>Active & Settled Workflows ({tasks.length})</h2>
+            <button
+              onClick={fetchTasks}
+              style={{
+                backgroundColor: "transparent",
+                border: "1px solid #30363d",
+                color: "#8b949e",
+                borderRadius: "4px",
+                padding: "4px 8px",
+                cursor: "pointer",
+                fontSize: "12px",
+              }}
+            >
+              ↻ Refresh
+            </button>
           </div>
-        </section>
-      )}
 
-      <section>
-        <h2 style={{ fontSize: "20px", color: "#f0f6fc", marginBottom: "16px" }}>Active Orchestration Tasks</h2>
-        {tasks.length === 0 ? (
-          <div style={{ backgroundColor: "#161b22", border: "1px dashed #30363d", borderRadius: "8px", padding: "32px", textAlign: "center", color: "#8b949e" }}>
-            No active tasks. Enter an intent above to start autonomous execution.
-          </div>
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
-            {tasks.map((task) => (
-              <div
-                key={task.id}
-                style={{
-                  backgroundColor: "#161b22",
-                  border: "1px solid #30363d",
-                  borderRadius: "8px",
-                  padding: "16px",
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                }}
-              >
-                <div>
-                  <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "6px" }}>
-                    <span style={{ fontWeight: 600, color: "#f0f6fc" }}>{task.intent}</span>
-                    {getStatusBadge(task.status, task.attentionState)}
+          <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+            {tasks.length === 0 ? (
+              <div style={{ color: "#8b949e", padding: "32px", textAlign: "center", backgroundColor: "#161b22", borderRadius: "8px", border: "1px solid #30363d" }}>
+                No active workflows recorded. Dispatch an intent above to start orchestration.
+              </div>
+            ) : (
+              tasks.map((task) => (
+                <div
+                  key={task.id}
+                  style={{
+                    backgroundColor: "#161b22",
+                    border: "1px solid #30363d",
+                    borderRadius: "8px",
+                    padding: "18px",
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "10px",
+                  }}
+                >
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: "12px" }}>
+                    <div style={{ fontWeight: 600, color: "#f0f6fc", fontSize: "15px" }}>{task.intent}</div>
+                    <div>{getStatusBadge(task.status, task.attentionState)}</div>
                   </div>
-                  <div style={{ fontSize: "12px", color: "#8b949e", display: "flex", gap: "16px" }}>
-                    <span>Task ID: <code>{task.id}</code></span>
-                    <span>Branch: <code>{task.workBranch}</code></span>
-                    <span>Mode: <code>{task.routingMode}</code></span>
-                    {task.prUrl && (
+
+                  <div style={{ fontSize: "12px", color: "#8b949e", display: "flex", gap: "16px", flexWrap: "wrap" }}>
+                    <span>ID: <code style={{ color: "#79c0ff" }}>{task.id}</code></span>
+                    <span>Branch: <code style={{ color: "#7ee787" }}>{task.workBranch}</code></span>
+                    {task.commitSha && (
+                      <span>Commit: <code style={{ color: "#d2a8ff" }}>{task.commitSha.slice(0, 7)}</code></span>
+                    )}
+                    {task.prNumber && (
                       <span>
                         PR: <a href={task.prUrl} target="_blank" rel="noreferrer" style={{ color: "#58a6ff" }}>#{task.prNumber}</a>
                       </span>
                     )}
                   </div>
+
+                  {/* Model Execution Audit Trail */}
+                  {task.modelUsageAudit && task.modelUsageAudit.length > 0 && (
+                    <div style={{ marginTop: "4px", backgroundColor: "#0d1117", borderRadius: "6px", padding: "8px 12px", border: "1px solid #21262d" }}>
+                      <div style={{ fontSize: "11px", color: "#8b949e", marginBottom: "4px", fontWeight: 600 }}>ROUTED AGENTS & MODELS AUDIT:</div>
+                      <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+                        {task.modelUsageAudit.map((m, idx) => (
+                          <span
+                            key={idx}
+                            style={{
+                              fontSize: "11px",
+                              padding: "2px 6px",
+                              borderRadius: "4px",
+                              backgroundColor: "#1f242c",
+                              color: "#c9d1d9",
+                              border: "1px solid #30363d",
+                            }}
+                          >
+                            <strong style={{ color: "#58a6ff" }}>{m.role}</strong>: {m.model} ({m.durationMs}ms{m.tokens ? ` • ${m.tokens} tok` : ""})
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Verification Results */}
+                  {task.verificationResults && task.verificationResults.length > 0 && (
+                    <div style={{ fontSize: "12px", display: "flex", gap: "8px", alignItems: "center" }}>
+                      <span style={{ color: "#8b949e" }}>Verification:</span>
+                      {task.verificationResults.map((v, i) => (
+                        <span
+                          key={i}
+                          style={{
+                            color: v.passed ? "#3fb950" : "#f85149",
+                            fontWeight: 600,
+                          }}
+                        >
+                          {v.passed ? "✓" : "✗"} {v.command} ({v.durationMs}ms)
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  {task.error && (
+                    <div style={{ color: "#f85149", fontSize: "12px", backgroundColor: "#ffebe911", padding: "8px", borderRadius: "4px", border: "1px solid #f8514933" }}>
+                      Error: {task.error}
+                    </div>
+                  )}
                 </div>
-              </div>
-            ))}
+              ))
+            )}
           </div>
-        )}
-      </section>
+        </section>
+
+        <section>
+          <h2 style={{ margin: "0 0 16px 0", fontSize: "18px", color: "#f0f6fc" }}>Live Orchestration Stream</h2>
+          <div
+            style={{
+              backgroundColor: "#161b22",
+              border: "1px solid #30363d",
+              borderRadius: "8px",
+              padding: "16px",
+              height: "460px",
+              overflowY: "auto",
+              fontFamily: "ui-monospace, monospace",
+              fontSize: "12px",
+              display: "flex",
+              flexDirection: "column",
+              gap: "8px",
+            }}
+          >
+            {notifications.length === 0 ? (
+              <span style={{ color: "#484f58" }}>Waiting for attention stream events...</span>
+            ) : (
+              notifications.map((msg, index) => (
+                <div key={index} style={{ color: msg.includes("ATTENTION") ? "#f85149" : msg.includes("SETTLED") ? "#3fb950" : "#8b949e" }}>
+                  {msg}
+                </div>
+              ))
+            )}
+          </div>
+        </section>
+      </div>
     </div>
   );
 }

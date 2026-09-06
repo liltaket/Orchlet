@@ -1,0 +1,20 @@
+services:
+  orchlet:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: orchlet-control-plane
+    ports:
+      - "4774:4774"
+    environment:
+      - PORT=4774
+      - HOST=0.0.0.0
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+    volumes:
+      - orchlet-data:/root/.orchlet
+    restart: unless-stopped
+
+volumes:
+  orchlet-data:
+    driver: local

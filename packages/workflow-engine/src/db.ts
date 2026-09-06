@@ -29,8 +29,11 @@ export class TaskStore {
         base_branch TEXT NOT NULL,
         work_branch TEXT NOT NULL,
         worktree_path TEXT,
+        commit_sha TEXT,
         plan_json TEXT,
         review_json TEXT,
+        verification_json TEXT,
+        model_audit_json TEXT,
         pr_number INTEGER,
         pr_url TEXT,
         error TEXT,
@@ -52,19 +55,38 @@ export class TaskStore {
       CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks (status);
       CREATE INDEX IF NOT EXISTS idx_checkpoints_task ON checkpoints (task_id);
     `);
+
+    // Safe column migrations for existing SQLite stores
+    try {
+      this.db.exec(`ALTER TABLE tasks ADD COLUMN commit_sha TEXT;`);
+    } catch {
+      // Column may already exist
+    }
+    try {
+      this.db.exec(`ALTER TABLE tasks ADD COLUMN verification_json TEXT;`);
+    } catch {
+      // Column may already exist
+    }
+    try {
+      this.db.exec(`ALTER TABLE tasks ADD COLUMN model_audit_json TEXT;`);
+    } catch {
+      // Column may already exist
+    }
   }
 
   saveTask(task: Task): void {
     const stmt = this.db.prepare(`
       INSERT INTO tasks (
         id, intent, status, attention_state, routing_mode,
-        repo_path, base_branch, work_branch, worktree_path,
-        plan_json, review_json, pr_number, pr_url, error,
+        repo_path, base_branch, work_branch, worktree_path, commit_sha,
+        plan_json, review_json, verification_json, model_audit_json,
+        pr_number, pr_url, error,
         created_at, updated_at
       ) VALUES (
         ?, ?, ?, ?, ?,
-        ?, ?, ?, ?,
         ?, ?, ?, ?, ?,
+        ?, ?, ?, ?,
+        ?, ?, ?,
         ?, ?
       )
       ON CONFLICT(id) DO UPDATE SET
@@ -72,8 +94,11 @@ export class TaskStore {
         attention_state = excluded.attention_state,
         routing_mode = excluded.routing_mode,
         worktree_path = excluded.worktree_path,
+        commit_sha = excluded.commit_sha,
         plan_json = excluded.plan_json,
         review_json = excluded.review_json,
+        verification_json = excluded.verification_json,
+        model_audit_json = excluded.model_audit_json,
         pr_number = excluded.pr_number,
         pr_url = excluded.pr_url,
         error = excluded.error,
@@ -90,8 +115,11 @@ export class TaskStore {
       task.baseBranch,
       task.workBranch,
       task.worktreePath || null,
+      task.commitSha || null,
       task.plan ? JSON.stringify(task.plan) : null,
       task.latestReview ? JSON.stringify(task.latestReview) : null,
+      task.verificationResults ? JSON.stringify(task.verificationResults) : null,
+      task.modelUsageAudit ? JSON.stringify(task.modelUsageAudit) : null,
       task.prNumber || null,
       task.prUrl || null,
       task.error || null,
@@ -157,8 +185,11 @@ export class TaskStore {
       baseBranch: row.base_branch,
       workBranch: row.work_branch,
       worktreePath: row.worktree_path || undefined,
+      commitSha: row.commit_sha || undefined,
       plan: row.plan_json ? JSON.parse(row.plan_json) : undefined,
       latestReview: row.review_json ? JSON.parse(row.review_json) : undefined,
+      verificationResults: row.verification_json ? JSON.parse(row.verification_json) : undefined,
+      modelUsageAudit: row.model_audit_json ? JSON.parse(row.model_audit_json) : undefined,
       prNumber: row.pr_number || undefined,
       prUrl: row.pr_url || undefined,
       error: row.error || undefined,
